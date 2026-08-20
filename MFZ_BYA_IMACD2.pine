@@ -29,7 +29,7 @@
 //   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
 // =============================================================================
 
-indicator(title = "MFZ BYA IMACD2", shorttitle = "MFZ BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500)
+indicator(title = "MFZ BYA IMACD2", shorttitle = "MFZ BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
 
 // =============================================================================
 //  INPUT GROUPS
@@ -137,11 +137,13 @@ dashSizeV  = dashSizeI == "Tiny" ? size.tiny : dashSizeI == "Normal" ? size.norm
 //  IMPULSE MACD ENGINE (LazyBear logic, converted to Pine v6)
 // =============================================================================
 
-// Smoothed moving average (SMMA / RMA style) used for the high & low bands.
+// Smoothed moving average used for the high & low impulse bands.
+// LazyBear's original loop was:  smma = (smma[1] * (len - 1) + src) / len
+// seeded with an SMA. ta.rma() is exactly that same Wilder smoothing, but it
+// carries no self-referencing series, which avoids the "Pine cannot determine
+// the referencing length of series" runtime error when the script is attached.
 calc_smma(float source, simple int len) =>
-    float smma = 0.0
-    smma := na(smma[1]) ? ta.sma(source, len) : (smma[1] * (len - 1) + source) / len
-    smma
+    ta.rma(source, len)
 
 // Zero-lag EMA used for the mid line.
 calc_zlema(float source, simple int len) =>
