@@ -7,6 +7,16 @@ into a live-ready setup with Entry / SL / TP1 / TP2 / TP3 levels and a TVMT webh
 ## Files
 - `MFZ_BYA_IMACD2.pine` — the complete indicator, ready to paste into the TradingView Pine Editor.
 
+## Signal
+Default **Signal Mode = "Signal Line crosses MACD"** with **Signal Length 3** and **MA Length 10**:
+
+- signal line (3) crosses **up** through the Impulse MACD line (10) → **BUY**
+- signal line (3) crosses **down** through the Impulse MACD line (10) → **SELL**
+
+Three other modes are selectable in Settings:
+`Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
+`MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
+
 ## Key behaviour
 - **No repainting** — signals are gated behind `barstate.isconfirmed`, so a printed marker never disappears.
 - **Distance Method** dropdown: `Pip` / `ATR` / `Percentage`. All three engines are built in and apply to all four levels.
