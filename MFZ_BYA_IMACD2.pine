@@ -52,12 +52,12 @@ G_DASH  = "5 - Win Rate Dashboard"
 lengthMA     = input.int(10, "Impulse MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Drives the Impulse MACD line (md). Default = 10. LazyBear original used 34.", display = display.none)
 lengthSignal = input.int(3, "Signal Line Length (fast line)", minval = 1, group = G_SIG, tooltip = "Drives the signal line (sb). Default = 3. LazyBear original used 9.", display = display.none)
 srcInput     = input.source(hlc3, "Price Source", group = G_SIG, display = display.none)
-signalMode   = input.string("Fast MA crosses Slow MA (price)", "Signal Mode", options = ["Signal Line crosses MACD", "Fast MA crosses Slow MA (price)", "MACD crosses Signal Line", "Zero Line Cross"], group = G_SIG, tooltip = "Signal Line crosses MACD (default): the fast signal line (Signal Length 3) crossing UP through the Impulse MACD line (MA Length 10) = BUY, crossing DOWN = SELL.\nFast MA crosses Slow MA (price): a plain EMA(3) over EMA(10) price crossover = BUY, under = SELL.\nMACD crosses Signal Line: the classic reversed orientation.\nZero Line Cross: the Impulse MACD crossing zero.", display = display.none)
-showMAs      = input.bool(true, "Show The Two MAs On Chart", group = G_SIG, tooltip = "Only draws in Fast MA / Slow MA mode, so you can see the crossover on price.", display = display.none)
+signalMode   = input.string("Signal Line crosses MACD", "Signal Mode", options = ["Signal Line crosses MACD", "Fast MA crosses Slow MA (price)", "MACD crosses Signal Line", "Zero Line Cross"], group = G_SIG, tooltip = "Signal Line crosses MACD (default): the fast signal line (Signal Length 3) crossing UP through the Impulse MACD line (MA Length 10) = BUY, crossing DOWN = SELL.\nFast MA crosses Slow MA (price): a plain EMA(3) over EMA(10) price crossover = BUY, under = SELL.\nMACD crosses Signal Line: the classic reversed orientation.\nZero Line Cross: the Impulse MACD crossing zero.", display = display.none)
+showMAs      = input.bool(false, "Show The Two MAs On Chart", group = G_SIG, tooltip = "Only draws in Fast MA / Slow MA mode, so you can see the crossover on price.", display = display.none)
 fastMACol    = input.color(color.aqua, "Fast MA Colour", group = G_SIG, display = display.none)
 slowMACol    = input.color(color.orange, "Slow MA Colour", group = G_SIG, display = display.none)
-useZone      = input.bool(true, "Require Impulse Zone Confirmation", group = G_SIG, tooltip = "Buy only while price is above the mid band, Sell only while below it. Filters out weak crosses.", display = display.none)
-flipOnly     = input.bool(true, "One Signal Per Direction (wait for opposite)", group = G_SIG, tooltip = "Blocks a second Buy before a Sell appears. Keeps one live setup at a time.", display = display.none)
+useZone      = input.bool(false, "Require Impulse Zone Confirmation", group = G_SIG, tooltip = "Buy only while price is above the mid band, Sell only while below it. Filters out weak crosses.", display = display.none)
+flipOnly     = input.bool(false, "One Signal Per Direction (wait for opposite)", group = G_SIG, tooltip = "Blocks a second Buy before a Sell appears. Keeps one live setup at a time.", display = display.none)
 
 // -----------------------------------------------------------------------------
 //  2. DISTANCE METHOD INPUTS  (Pip / ATR / Percentage - trader picks one)
@@ -163,30 +163,49 @@ float md = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
 float sb = ta.sma(md, lengthSignal)          // signal line
 
 // -----------------------------------------------------------------------------
-//  RAW SIGNALS
+//  RAW SIGNALS - one pair per mode, the dropdown picks which pair is used
+//
+//  WHY NOT ta.crossover()?  ta.crossover(a, b) needs a to be strictly BELOW b
+//  on the previous bar and strictly ABOVE it now. When the Impulse MACD sits at
+//  exactly 0 (price inside the bands), md is 0 and sb - its own average - is 0
+//  too. The two lines sit ON TOP of each other at the zero level, which LOOKS
+//  like a crossing on the chart but registers as no cross at all, because
+//  neither is ever strictly above the other. That is why signals only appeared
+//  at the moments the lines happened to separate.
+//
+//  f_signFlip fixes that. It watches the SIGN of (line1 - line2) and fires the
+//  moment that sign flips, ignoring any flat stretch at zero in between. So a
+//  cross is detected whenever the lines genuinely swap places, whether they
+//  crossed cleanly or sat together at zero first.
 // -----------------------------------------------------------------------------
-// PRIMARY MODE: the fast signal line (lengthSignal, default 3) crossing the
-// slower Impulse MACD line (lengthMA, default 10).
-//   sb crosses UP   through md  -> BUY
-//   sb crosses DOWN through md  -> SELL
-bool sigUp     = ta.crossover(sb, md)
-bool sigDn     = ta.crossunder(sb, md)
+f_signFlip(float d, bool confirmed) =>
+    int cur = d > 0 ? 1 : d < 0 ? -1 : 0
+    var int last = 0
+    bool up = false
+    bool dn = false
+    if confirmed and cur != 0
+        if last != 0 and cur != last
+            up := cur == 1
+            dn := cur == -1
+        last := cur
+    [up, dn]
 
-// PRICE MA MODE: a plain fast/slow EMA crossover on price, using the same two
-// length inputs (Signal Length = fast, MA Length = slow).
-float fastMA   = ta.ema(srcInput, lengthSignal)
-float slowMA   = ta.ema(srcInput, lengthMA)
-bool  maUp     = ta.crossover(fastMA, slowMA)
-bool  maDn     = ta.crossunder(fastMA, slowMA)
+// PRICE MA MODE: fast EMA above slow EMA = BUY.
+float fastMA = ta.ema(srcInput, lengthSignal)
+float slowMA = ta.ema(srcInput, lengthMA)
+[maUp, maDn] = f_signFlip(fastMA - slowMA, barstate.isconfirmed)
 
-// ALTERNATIVE MODES (kept so the trader can switch back in Settings).
-bool macdUp    = ta.crossover(md, sb)    // classic reversed orientation
-bool macdDn    = ta.crossunder(md, sb)
-bool zeroUp    = ta.crossover(md, 0.0)   // Impulse MACD crossing the zero line
-bool zeroDn    = ta.crossunder(md, 0.0)
+// IMPULSE MODE (default): signal line crossing ABOVE the Impulse MACD = BUY.
+[sigUp, sigDn] = f_signFlip(sb - md, barstate.isconfirmed)
 
-bool rawBuy    = signalMode == "Zero Line Cross" ? zeroUp : signalMode == "MACD crosses Signal Line" ? macdUp : signalMode == "Fast MA crosses Slow MA (price)" ? maUp : sigUp
-bool rawSell   = signalMode == "Zero Line Cross" ? zeroDn : signalMode == "MACD crosses Signal Line" ? macdDn : signalMode == "Fast MA crosses Slow MA (price)" ? maDn : sigDn
+// REVERSED ORIENTATION: Impulse MACD crossing ABOVE its signal line = BUY.
+[macdUp, macdDn] = f_signFlip(md - sb, barstate.isconfirmed)
+
+// ZERO LINE: Impulse MACD turning positive = BUY.
+[zeroUp, zeroDn] = f_signFlip(md, barstate.isconfirmed)
+
+bool rawBuy  = signalMode == "Zero Line Cross" ? zeroUp : signalMode == "MACD crosses Signal Line" ? macdUp : signalMode == "Fast MA crosses Slow MA (price)" ? maUp : sigUp
+bool rawSell = signalMode == "Zero Line Cross" ? zeroDn : signalMode == "MACD crosses Signal Line" ? macdDn : signalMode == "Fast MA crosses Slow MA (price)" ? maDn : sigDn
 
 // Optional MA plots. display.pane draws them on the chart but keeps their
 // values OUT of the status line, so the legend stays clean.
