@@ -1,0 +1,431 @@
+//@version=6
+// =============================================================================
+//  MFZ BYA IMACD2
+// -----------------------------------------------------------------------------
+//  Signal engine adapted from "Impulse MACD [LazyBear]" (open source, credit to
+//  LazyBear). The original was a lower-pane study; this version is an OVERLAY
+//  indicator that draws trade levels on the price chart and sends a fixed JSON
+//  alert for the TVMT webhook bridge.
+//
+//  HOW IT WORKS (beginner summary)
+//   1. Impulse MACD (md) is compared with its signal line (sb) to find turns.
+//   2. A signal is only accepted when the bar has CLOSED (barstate.isconfirmed),
+//      so a printed arrow can never disappear again -> no repainting.
+//   3. On that closed bar we capture Entry / SL / TP1 / TP2 / TP3 prices,
+//      draw them, and feed them to five hidden plots that the alert reads.
+//   4. The alert message is pure JSON built from {{plot("title")}} placeholders,
+//      so TVMT always receives raw numbers in the exact expected field names.
+//
+//  ALERT SETUP (do this once in TradingView)
+//   Right-click chart -> Add alert -> Condition: "MFZ BYA IMACD2"
+//   -> choose "MFZ BUY (TVMT)" or "MFZ SELL (TVMT)"
+//   -> Trigger: "Once Per Bar Close"
+//   -> The Message box is pre-filled with the JSON. Do not edit it.
+//   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
+// =============================================================================
+
+indicator(title = "MFZ BYA IMACD2", shorttitle = "MFZ BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+// =============================================================================
+//  INPUT GROUPS
+//  NOTE: every single input below uses display = display.none. That keeps the
+//  chart status line clean (only the indicator name shows), while the inputs
+//  still appear normally in Settings -> Inputs.
+// =============================================================================
+G_SIG   = "1 - Signal Engine (Impulse MACD)"
+G_DIST  = "2 - Distance Method (SL / TP)"
+G_PIP   = "2a - Pip Settings"
+G_ATR   = "2b - ATR Settings"
+G_PCT   = "2c - Percentage Settings"
+G_MARK  = "3 - Marker Style"
+G_LINE  = "4 - Line & Label Style"
+G_DASH  = "5 - Win Rate Dashboard"
+
+// -----------------------------------------------------------------------------
+//  1. SIGNAL ENGINE INPUTS
+// -----------------------------------------------------------------------------
+lengthMA     = input.int(34, "Impulse MA Length", minval = 1, group = G_SIG, tooltip = "LazyBear default = 34", display = display.none)
+lengthSignal = input.int(9, "Signal Line Length", minval = 1, group = G_SIG, tooltip = "LazyBear default = 9", display = display.none)
+srcInput     = input.source(hlc3, "Price Source", group = G_SIG, display = display.none)
+signalMode   = input.string("MACD / Signal Cross", "Signal Mode", options = ["MACD / Signal Cross", "Zero Line Cross"], group = G_SIG, tooltip = "How a Buy/Sell is detected on the Impulse MACD.", display = display.none)
+useZone      = input.bool(true, "Require Impulse Zone Confirmation", group = G_SIG, tooltip = "Buy only while price is above the mid band, Sell only while below it. Filters out weak crosses.", display = display.none)
+flipOnly     = input.bool(true, "One Signal Per Direction (wait for opposite)", group = G_SIG, tooltip = "Blocks a second Buy before a Sell appears. Keeps one live setup at a time.", display = display.none)
+
+// -----------------------------------------------------------------------------
+//  2. DISTANCE METHOD INPUTS  (Pip / ATR / Percentage - trader picks one)
+// -----------------------------------------------------------------------------
+distMethod = input.string("Pip", "Distance Method", options = ["Pip", "ATR", "Percentage"], group = G_DIST, tooltip = "Chosen method applies to SL, TP1, TP2 and TP3 together. All three engines are built in - switch anytime.", display = display.none)
+
+// --- 2a. PIP ENGINE ---
+// 1 pip = 10 points, and 1 point = syminfo.mintick (the smallest price step).
+//   XAUUSD 2-decimal feed : mintick 0.01   -> pip 0.10
+//   XAUUSD 3-decimal feed : mintick 0.001  -> pip 0.01
+//   5-digit forex         : mintick 0.00001-> pip 0.0001
+//   3-digit JPY forex     : mintick 0.001  -> pip 0.01
+// The raw tick is NEVER used as the pip.
+pipMode   = input.string("Auto (10 x mintick)", "Pip Size Mode", options = ["Auto (10 x mintick)", "Manual"], group = G_PIP, tooltip = "Auto covers gold, 5-digit forex and 3-digit JPY. Use Manual only if your broker quotes differently.", display = display.none)
+manualPip = input.float(0.10, "Manual Pip Size (price units)", minval = 0.0, step = 0.00001, group = G_PIP, tooltip = "Example: 0.10 for a 2-decimal XAUUSD feed, 0.0001 for 5-digit forex.", display = display.none)
+slPips    = input.float(150.0, "Stop Loss (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+tp1Pips   = input.float(150.0, "Take Profit 1 (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+tp2Pips   = input.float(300.0, "Take Profit 2 (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+tp3Pips   = input.float(450.0, "Take Profit 3 (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+
+// --- 2b. ATR ENGINE ---
+atrLength = input.int(14, "ATR Length", minval = 1, group = G_ATR, display = display.none)
+slAtr     = input.float(1.5, "Stop Loss (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+tp1Atr    = input.float(1.5, "Take Profit 1 (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+tp2Atr    = input.float(3.0, "Take Profit 2 (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+tp3Atr    = input.float(4.5, "Take Profit 3 (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+
+// --- 2c. PERCENTAGE ENGINE ---
+slPct  = input.float(0.50, "Stop Loss (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+tp1Pct = input.float(0.50, "Take Profit 1 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+tp2Pct = input.float(1.00, "Take Profit 2 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+tp3Pct = input.float(1.50, "Take Profit 3 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  3. MARKER STYLE INPUTS  (shape + colour are trader-selectable)
+// -----------------------------------------------------------------------------
+buyShape   = input.string("Label Up", "Buy Marker Shape", options = ["Label Up", "Triangle Up", "Arrow Up", "Circle", "Diamond", "Flag", "Square", "Cross", "X Cross"], group = G_MARK, display = display.none)
+sellShape  = input.string("Label Down", "Sell Marker Shape", options = ["Label Down", "Triangle Down", "Arrow Down", "Circle", "Diamond", "Flag", "Square", "Cross", "X Cross"], group = G_MARK, display = display.none)
+buyColor   = input.color(color.green, "Buy Marker Colour", group = G_MARK, display = display.none)
+sellColor  = input.color(color.red, "Sell Marker Colour", group = G_MARK, display = display.none)
+buyTxtCol  = input.color(color.white, "Buy Marker Text Colour", group = G_MARK, display = display.none)
+sellTxtCol = input.color(color.white, "Sell Marker Text Colour", group = G_MARK, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  4. LINE & LABEL STYLE INPUTS
+// -----------------------------------------------------------------------------
+entryCol   = input.color(color.yellow, "Entry Line Colour", group = G_LINE, display = display.none)
+slCol      = input.color(color.red, "Stop Loss Line Colour", group = G_LINE, display = display.none)
+tp1Col     = input.color(color.aqua, "Take Profit 1 Line Colour", group = G_LINE, display = display.none)
+tp2Col     = input.color(color.aqua, "Take Profit 2 Line Colour", group = G_LINE, display = display.none)
+tp3Col     = input.color(color.aqua, "Take Profit 3 Line Colour", group = G_LINE, display = display.none)
+lineWidth  = input.int(1, "Line Width", minval = 1, maxval = 4, group = G_LINE, display = display.none)
+lineStyleI = input.string("Solid", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = G_LINE, display = display.none)
+rightPad   = input.int(20, "Extend Lines / Labels To The Right (bars)", minval = 1, maxval = 200, group = G_LINE, tooltip = "Lines and labels are re-anchored to the live edge on every bar, so they can never scroll off the screen.", display = display.none)
+showLabels = input.bool(true, "Show Level Labels", group = G_LINE, display = display.none)
+showPips   = input.bool(true, "Show Distance In Pips On Labels", group = G_LINE, display = display.none)
+labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small", "Normal"], group = G_LINE, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  5. DASHBOARD INPUTS
+// -----------------------------------------------------------------------------
+showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
+dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
+dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
+dashTxt    = input.color(color.white, "Dashboard Text Colour", group = G_DASH, display = display.none)
+dashWinCol = input.color(color.lime, "Dashboard Win Colour", group = G_DASH, display = display.none)
+dashLosCol = input.color(color.red, "Dashboard Loss Colour", group = G_DASH, display = display.none)
+
+// =============================================================================
+//  STYLE HELPERS - turn the text choices above into real Pine constants
+// =============================================================================
+lineStyleV = lineStyleI == "Dashed" ? line.style_dashed : lineStyleI == "Dotted" ? line.style_dotted : line.style_solid
+labSizeV   = labSizeI  == "Tiny" ? size.tiny : labSizeI  == "Normal" ? size.normal : size.small
+dashSizeV  = dashSizeI == "Tiny" ? size.tiny : dashSizeI == "Normal" ? size.normal : size.small
+
+// =============================================================================
+//  IMPULSE MACD ENGINE (LazyBear logic, converted to Pine v6)
+// =============================================================================
+
+// Smoothed moving average (SMMA / RMA style) used for the high & low bands.
+calc_smma(float source, simple int len) =>
+    float smma = 0.0
+    smma := na(smma[1]) ? ta.sma(source, len) : (smma[1] * (len - 1) + source) / len
+    smma
+
+// Zero-lag EMA used for the mid line.
+calc_zlema(float source, simple int len) =>
+    float ema1 = ta.ema(source, len)
+    float ema2 = ta.ema(ema1, len)
+    float d = ema1 - ema2
+    ema1 + d
+
+float hiBand = calc_smma(high, lengthMA)     // upper impulse band
+float loBand = calc_smma(low, lengthMA)      // lower impulse band
+float mid    = calc_zlema(srcInput, lengthMA) // zero-lag mid line
+
+// md = the Impulse MACD value. It is 0 while price sits inside the bands.
+float md = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
+float sb = ta.sma(md, lengthSignal)          // signal line
+
+// -----------------------------------------------------------------------------
+//  RAW SIGNALS
+// -----------------------------------------------------------------------------
+bool crossUp   = ta.crossover(md, sb)
+bool crossDn   = ta.crossunder(md, sb)
+bool zeroUp    = ta.crossover(md, 0.0)
+bool zeroDn    = ta.crossunder(md, 0.0)
+bool rawBuy    = signalMode == "Zero Line Cross" ? zeroUp : crossUp
+bool rawSell   = signalMode == "Zero Line Cross" ? zeroDn : crossDn
+
+// Optional zone filter: only trade in the direction of the impulse band.
+bool zoneBuyOk  = not useZone or srcInput > mid
+bool zoneSellOk = not useZone or srcInput < mid
+
+// NO REPAINT GATE: the bar must be finished before a signal counts.
+bool buyRaw  = rawBuy  and zoneBuyOk  and barstate.isconfirmed
+bool sellRaw = rawSell and zoneSellOk and barstate.isconfirmed
+
+// Optional "one signal per direction" filter (wait for the opposite side).
+var int lastDir = 0
+bool buySignal  = buyRaw  and (not flipOnly or lastDir != 1)
+bool sellSignal = sellRaw and (not flipOnly or lastDir != -1)
+if buySignal
+    lastDir := 1
+else if sellSignal
+    lastDir := -1
+
+// =============================================================================
+//  DISTANCE ENGINES - Pip / ATR / Percentage
+// =============================================================================
+float atrVal = ta.atr(atrLength)
+
+// Pip size in PRICE units. Auto = 10 points = 10 * mintick.
+float pipPrice = pipMode == "Manual" ? manualPip : 10.0 * syminfo.mintick
+
+// One helper used by all four levels, so switching method changes everything.
+f_dist(string method, float pipsVal, float atrMult, float pctVal, float entryP) =>
+    float d = method == "Pip" ? pipsVal * pipPrice : method == "ATR" ? atrVal * atrMult : entryP * pctVal / 100.0
+    d
+
+// =============================================================================
+//  LEVEL CAPTURE (only on a confirmed signal bar)
+// =============================================================================
+var float pEntry = na
+var float pSL    = na
+var float pTP1   = na
+var float pTP2   = na
+var float pTP3   = na
+var int   pDir   = 0        // +1 long setup, -1 short setup
+
+bool newSignal = buySignal or sellSignal
+
+if newSignal
+    float entryP = close                       // entry = close of the confirmed bar
+    float dSL  = f_dist(distMethod, slPips,  slAtr,  slPct,  entryP)
+    float dT1  = f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, entryP)
+    float dT2  = f_dist(distMethod, tp2Pips, tp2Atr, tp2Pct, entryP)
+    float dT3  = f_dist(distMethod, tp3Pips, tp3Atr, tp3Pct, entryP)
+    pDir   := buySignal ? 1 : -1
+    pEntry := entryP
+    pSL    := buySignal ? entryP - dSL : entryP + dSL
+    pTP1   := buySignal ? entryP + dT1 : entryP - dT1
+    pTP2   := buySignal ? entryP + dT2 : entryP - dT2
+    pTP3   := buySignal ? entryP + dT3 : entryP - dT3
+
+// =============================================================================
+//  DRAWINGS - only the LATEST setup is kept on the chart
+// =============================================================================
+var line lnE = na
+var line lnS = na
+var line lnT1 = na
+var line lnT2 = na
+var line lnT3 = na
+var label lbE = na
+var label lbS = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+
+// Build the text for a level label, e.g.  "TP1  2665.00  (+150.0 pips)"
+f_labTxt(string name, float price, float entryP) =>
+    string txt = name + "  " + str.tostring(price, format.mintick)
+    if showPips and pipPrice > 0
+        float pips = math.abs(price - entryP) / pipPrice
+        txt := txt + "  (" + str.tostring(pips, "#.#") + " pips)"
+    txt
+
+if newSignal
+    // delete the previous setup first
+    line.delete(lnE)
+    line.delete(lnS)
+    line.delete(lnT1)
+    line.delete(lnT2)
+    line.delete(lnT3)
+    label.delete(lbE)
+    label.delete(lbS)
+    label.delete(lbT1)
+    label.delete(lbT2)
+    label.delete(lbT3)
+
+    int x2 = bar_index + rightPad
+    lnE  := line.new(bar_index, pEntry, x2, pEntry, color = entryCol, width = lineWidth, style = lineStyleV)
+    lnS  := line.new(bar_index, pSL,    x2, pSL,    color = slCol,    width = lineWidth, style = lineStyleV)
+    lnT1 := line.new(bar_index, pTP1,   x2, pTP1,   color = tp1Col,   width = lineWidth, style = lineStyleV)
+    lnT2 := line.new(bar_index, pTP2,   x2, pTP2,   color = tp2Col,   width = lineWidth, style = lineStyleV)
+    lnT3 := line.new(bar_index, pTP3,   x2, pTP3,   color = tp3Col,   width = lineWidth, style = lineStyleV)
+
+    if showLabels
+        lbE  := label.new(x2, pEntry, f_labTxt("ENTRY", pEntry, pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = entryCol, size = labSizeV)
+        lbS  := label.new(x2, pSL,    f_labTxt("SL",    pSL,    pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = slCol,    size = labSizeV)
+        lbT1 := label.new(x2, pTP1,   f_labTxt("TP1",   pTP1,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp1Col,   size = labSizeV)
+        lbT2 := label.new(x2, pTP2,   f_labTxt("TP2",   pTP2,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp2Col,   size = labSizeV)
+        lbT3 := label.new(x2, pTP3,   f_labTxt("TP3",   pTP3,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp3Col,   size = labSizeV)
+
+// Re-anchor every bar so lines stay extended and labels never scroll off screen.
+if not na(lnE)
+    int xNow = bar_index + rightPad
+    line.set_x2(lnE,  xNow)
+    line.set_x2(lnS,  xNow)
+    line.set_x2(lnT1, xNow)
+    line.set_x2(lnT2, xNow)
+    line.set_x2(lnT3, xNow)
+    if showLabels and not na(lbE)
+        label.set_x(lbE,  xNow)
+        label.set_x(lbS,  xNow)
+        label.set_x(lbT1, xNow)
+        label.set_x(lbT2, xNow)
+        label.set_x(lbT3, xNow)
+
+// =============================================================================
+//  MARKERS - one plotshape per shape choice, only the selected one draws
+// =============================================================================
+plotshape(buySignal and buyShape == "Label Up",     title = "Buy - Label Up",     style = shape.labelup,      location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Triangle Up",  title = "Buy - Triangle Up",  style = shape.triangleup,   location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Arrow Up",     title = "Buy - Arrow Up",     style = shape.arrowup,      location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Circle",       title = "Buy - Circle",       style = shape.circle,       location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Diamond",      title = "Buy - Diamond",      style = shape.diamond,      location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Flag",         title = "Buy - Flag",         style = shape.flag,         location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Square",       title = "Buy - Square",       style = shape.square,       location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "Cross",        title = "Buy - Cross",        style = shape.cross,        location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+plotshape(buySignal and buyShape == "X Cross",      title = "Buy - X Cross",      style = shape.xcross,       location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+
+plotshape(sellSignal and sellShape == "Label Down",    title = "Sell - Label Down",    style = shape.labeldown,    location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Triangle Down", title = "Sell - Triangle Down", style = shape.triangledown, location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Arrow Down",    title = "Sell - Arrow Down",    style = shape.arrowdown,    location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Circle",        title = "Sell - Circle",        style = shape.circle,       location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Diamond",       title = "Sell - Diamond",       style = shape.diamond,      location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Flag",          title = "Sell - Flag",          style = shape.flag,         location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Square",        title = "Sell - Square",        style = shape.square,       location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "Cross",         title = "Sell - Cross",         style = shape.cross,        location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+plotshape(sellSignal and sellShape == "X Cross",       title = "Sell - X Cross",       style = shape.xcross,       location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+
+// =============================================================================
+//  ALERT PLOTS - read by {{plot("title")}}, matched by TITLE not by number.
+//  display.none keeps them off the chart; TradingView still feeds them to the
+//  alert placeholders. nz(..., close) guarantees a finite number, never na.
+// =============================================================================
+plot(nz(pEntry, close), title = "entry", display = display.none)
+plot(nz(pSL,    close), title = "sl",    display = display.none)
+plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
+plot(nz(pTP2,   close), title = "tp2",   display = display.none)
+plot(nz(pTP3,   close), title = "tp3",   display = display.none)
+
+// =============================================================================
+//  TVMT WEBHOOK ALERTS - exact JSON, nothing else in the message box.
+//  Set the alert trigger to "Once Per Bar Close".
+// =============================================================================
+alertcondition(buySignal, title = "MFZ BUY (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "buy",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"\n}')
+
+alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "sell",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-sell-{{time}}"\n}')
+
+// =============================================================================
+//  WIN RATE DASHBOARD
+//  Walks one virtual trade at a time forward through the loaded history using
+//  the indicator's OWN signals and the SAME SL / TP levels drawn on the chart.
+//  SL before TP1 = Loss. TP1 or better = Win. It is a quick overview, not a
+//  tick-precise backtester: when one bar touches both sides we estimate the
+//  order from the bar's open / high / low.
+// =============================================================================
+var int   vDir   = 0
+var float vEntry = na
+var float vSL    = na
+var float vT1    = na
+var float vT2    = na
+var float vT3    = na
+var bool  vGotT1 = false
+var bool  vGotT2 = false
+var bool  vGotT3 = false
+
+var int totalTrades = 0
+var int winCount    = 0
+var int lossCount   = 0
+var int slCount     = 0
+var int t1Count     = 0
+var int t2Count     = 0
+var int t3Count     = 0
+
+if showDash and barstate.isconfirmed
+    // ---- 1) walk the open virtual trade forward with this bar's range ----
+    if vDir != 0
+        bool slHit = vDir == 1 ? low  <= vSL : high >= vSL
+        bool t1Hit = vDir == 1 ? high >= vT1 : low  <= vT1
+        bool t2Hit = vDir == 1 ? high >= vT2 : low  <= vT2
+        bool t3Hit = vDir == 1 ? high >= vT3 : low  <= vT3
+
+        // Same-bar ambiguity: assume the level nearer to the open was hit first.
+        bool slFirst = slHit and t1Hit ? math.abs(open - vSL) <= math.abs(open - vT1) : slHit
+
+        if slFirst and not vGotT1
+            totalTrades += 1
+            lossCount   += 1
+            slCount     += 1
+            vDir := 0
+        else
+            if t1Hit and not vGotT1
+                vGotT1 := true
+                t1Count += 1
+            if t2Hit and not vGotT2 and vGotT1
+                vGotT2 := true
+                t2Count += 1
+            if t3Hit and not vGotT3 and vGotT2
+                vGotT3 := true
+                t3Count += 1
+            // Trade is finished once TP3 is done, or SL comes back after TP1.
+            if vGotT3 or (slHit and vGotT1)
+                totalTrades += 1
+                winCount    += 1
+                vDir := 0
+
+    // ---- 2) a new signal closes any open virtual trade and opens the next ----
+    if newSignal
+        if vDir != 0
+            totalTrades += 1
+            if vGotT1
+                winCount += 1
+            else
+                lossCount += 1
+        vDir   := pDir
+        vEntry := pEntry
+        vSL    := pSL
+        vT1    := pTP1
+        vT2    := pTP2
+        vT3    := pTP3
+        vGotT1 := false
+        vGotT2 := false
+        vGotT3 := false
+
+// ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
+var table dash = table.new(position.top_right, 2, 9, border_width = 1)
+
+f_pct(int part, int total) =>
+    float p = part          // cast to float first: int / int is integer division in Pine
+    float t = total
+    t > 0 ? str.tostring(p / t * 100.0, "#.#") + " %" : "-"
+
+if barstate.islast and showDash
+    float fWins  = winCount     // cast to float: int / int would truncate to 0
+    float fTotal = totalTrades
+    float winRate = fTotal > 0 ? fWins / fTotal * 100.0 : 0.0
+    color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
+
+    table.cell(dash, 0, 0, "MFZ BYA IMACD2", text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 0, distMethod,       text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 2, str.tostring(winCount), text_color = dashWinCol, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 3, "Losses",   text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 3, str.tostring(lossCount), text_color = dashLosCol, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 4, "Win Rate", text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 4, str.tostring(winRate, "#.#") + " %", text_color = rateCol, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 5, "SL Hit",   text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 5, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 6, "TP1 Hit",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 6, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 7, "TP2 Hit",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 7, f_pct(t2Count, totalTrades), text_color = tp2Col, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 8, "TP3 Hit",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg, text_size = dashSizeV)
