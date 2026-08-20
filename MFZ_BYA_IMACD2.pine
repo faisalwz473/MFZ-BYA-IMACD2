@@ -100,6 +100,7 @@ buyColor   = input.color(color.green, "Buy Marker Colour", group = G_MARK, displ
 sellColor  = input.color(color.red, "Sell Marker Colour", group = G_MARK, display = display.none)
 buyTxtCol  = input.color(color.white, "Buy Marker Text Colour", group = G_MARK, display = display.none)
 sellTxtCol = input.color(color.white, "Sell Marker Text Colour", group = G_MARK, display = display.none)
+markSizeI  = input.string("Small", "Marker Text Size", options = ["Tiny", "Small", "Normal", "Large"], group = G_MARK, display = display.none)
 
 // -----------------------------------------------------------------------------
 //  4. LINE & LABEL STYLE INPUTS
@@ -132,6 +133,7 @@ dashLosCol = input.color(color.red, "Dashboard Loss Colour", group = G_DASH, dis
 lineStyleV = lineStyleI == "Dashed" ? line.style_dashed : lineStyleI == "Dotted" ? line.style_dotted : line.style_solid
 labSizeV   = labSizeI  == "Tiny" ? size.tiny : labSizeI  == "Normal" ? size.normal : size.small
 dashSizeV  = dashSizeI == "Tiny" ? size.tiny : dashSizeI == "Normal" ? size.normal : size.small
+markerSizeV = markSizeI == "Tiny" ? size.tiny : markSizeI == "Normal" ? size.normal : markSizeI == "Large" ? size.large : size.small
 
 // =============================================================================
 //  IMPULSE MACD ENGINE (LazyBear logic, converted to Pine v6)
@@ -331,38 +333,48 @@ if not na(lnE)
         label.set_x(lbT3, xNow)
 
 // =============================================================================
-//  MARKERS - one plotshape per shape choice, only the selected one draws
+//  MARKERS - drawn as LABELS, not plotshapes.
+//  TradingView counts every plot output against a hard limit of 64 per script,
+//  and a plotshape with a variable colour compiles into THREE outputs (shape,
+//  colour, text colour). Nine shape choices x two directions = 54 outputs on
+//  their own, which broke the limit (runtime error RE10140).
+//  Labels are drawing objects, not plots, so they cost nothing against that
+//  limit and still allow the shape AND the colour to be chosen freely.
+//  Note: TradingView keeps at most 500 labels, so markers show for the most
+//  recent ~500 signals. The five level labels are re-used, not accumulated.
 // =============================================================================
-plotshape(buySignal and buyShape == "Label Up",     title = "Buy - Label Up",     style = shape.labelup,      location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Triangle Up",  title = "Buy - Triangle Up",  style = shape.triangleup,   location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Arrow Up",     title = "Buy - Arrow Up",     style = shape.arrowup,      location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Circle",       title = "Buy - Circle",       style = shape.circle,       location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Diamond",      title = "Buy - Diamond",      style = shape.diamond,      location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Flag",         title = "Buy - Flag",         style = shape.flag,         location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Square",       title = "Buy - Square",       style = shape.square,       location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "Cross",        title = "Buy - Cross",        style = shape.cross,        location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
-plotshape(buySignal and buyShape == "X Cross",      title = "Buy - X Cross",      style = shape.xcross,       location = location.belowbar, color = buyColor, text = "BUY",  textcolor = buyTxtCol,  size = size.small)
+f_markerStyle(string s) =>
+    switch s
+        "Label Up"      => label.style_label_up
+        "Label Down"    => label.style_label_down
+        "Triangle Up"   => label.style_triangleup
+        "Triangle Down" => label.style_triangledown
+        "Arrow Up"      => label.style_arrowup
+        "Arrow Down"    => label.style_arrowdown
+        "Circle"        => label.style_circle
+        "Diamond"       => label.style_diamond
+        "Flag"          => label.style_flag
+        "Square"        => label.style_square
+        "Cross"         => label.style_cross
+        "X Cross"       => label.style_xcross
+        => label.style_label_up
 
-plotshape(sellSignal and sellShape == "Label Down",    title = "Sell - Label Down",    style = shape.labeldown,    location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Triangle Down", title = "Sell - Triangle Down", style = shape.triangledown, location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Arrow Down",    title = "Sell - Arrow Down",    style = shape.arrowdown,    location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Circle",        title = "Sell - Circle",        style = shape.circle,       location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Diamond",       title = "Sell - Diamond",       style = shape.diamond,      location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Flag",          title = "Sell - Flag",          style = shape.flag,         location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Square",        title = "Sell - Square",        style = shape.square,       location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "Cross",         title = "Sell - Cross",         style = shape.cross,        location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
-plotshape(sellSignal and sellShape == "X Cross",       title = "Sell - X Cross",       style = shape.xcross,       location = location.abovebar, color = sellColor, text = "SELL", textcolor = sellTxtCol, size = size.small)
+if buySignal
+    label.new(bar_index, low, "BUY", yloc = yloc.belowbar, style = f_markerStyle(buyShape), color = buyColor, textcolor = buyTxtCol, size = markerSizeV)
+
+if sellSignal
+    label.new(bar_index, high, "SELL", yloc = yloc.abovebar, style = f_markerStyle(sellShape), color = sellColor, textcolor = sellTxtCol, size = markerSizeV)
 
 // =============================================================================
 //  ALERT PLOTS - read by {{plot("title")}}, matched by TITLE not by number.
 //  display.none keeps them off the chart; TradingView still feeds them to the
 //  alert placeholders. nz(..., close) guarantees a finite number, never na.
 // =============================================================================
-plot(nz(pEntry, close), title = "entry", display = display.data_window)
-plot(nz(pSL,    close), title = "sl",    display = display.data_window)
-plot(nz(pTP1,   close), title = "tp",    display = display.data_window)   // "tp" carries TP1
-plot(nz(pTP2,   close), title = "tp2",   display = display.data_window)
-plot(nz(pTP3,   close), title = "tp3",   display = display.data_window)
+plot(nz(pEntry, close), title = "entry", display = display.none)
+plot(nz(pSL,    close), title = "sl",    display = display.none)
+plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
+plot(nz(pTP2,   close), title = "tp2",   display = display.none)
+plot(nz(pTP3,   close), title = "tp3",   display = display.none)
 
 // =============================================================================
 //  TVMT WEBHOOK ALERTS - exact JSON, nothing else in the message box.

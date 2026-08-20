@@ -1,0 +1,54 @@
+//@version=6
+// STEP 2B - the five hidden level plots. NO drawings, NO alerts.
+indicator("MFZ STEP2B", "MFZ STEP2B", overlay = true)
+
+lengthMA     = input.int(10, "MA Length (slow)")
+lengthSignal = input.int(3,  "Signal Length (fast)")
+slPips       = input.float(150.0, "SL (pips)")
+tp1Pips      = input.float(150.0, "TP1 (pips)")
+tp2Pips      = input.float(300.0, "TP2 (pips)")
+tp3Pips      = input.float(450.0, "TP3 (pips)")
+src          = hlc3
+
+calc_smma(float s, simple int l) =>
+    ta.rma(s, l)
+
+calc_zlema(float s, simple int l) =>
+    float e1 = ta.ema(s, l)
+    float e2 = ta.ema(e1, l)
+    e1 + (e1 - e2)
+
+float hiBand = calc_smma(high, lengthMA)
+float loBand = calc_smma(low,  lengthMA)
+float mid    = calc_zlema(src, lengthMA)
+float md     = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
+float sb     = ta.sma(md, lengthSignal)
+
+bool buySignal  = ta.crossover(sb, md)  and barstate.isconfirmed
+bool sellSignal = ta.crossunder(sb, md) and barstate.isconfirmed
+bool newSignal  = buySignal or sellSignal
+
+float pipPrice = 10.0 * syminfo.mintick
+
+var float pEntry = na
+var float pSL    = na
+var float pTP1   = na
+var float pTP2   = na
+var float pTP3   = na
+
+if newSignal
+    float e = close
+    pEntry := e
+    pSL    := buySignal ? e - slPips  * pipPrice : e + slPips  * pipPrice
+    pTP1   := buySignal ? e + tp1Pips * pipPrice : e - tp1Pips * pipPrice
+    pTP2   := buySignal ? e + tp2Pips * pipPrice : e - tp2Pips * pipPrice
+    pTP3   := buySignal ? e + tp3Pips * pipPrice : e - tp3Pips * pipPrice
+
+plotshape(buySignal,  title = "BUY",  style = shape.labelup,   location = location.belowbar, color = color.green, text = "BUY",  textcolor = color.white, size = size.small)
+plotshape(sellSignal, title = "SELL", style = shape.labeldown, location = location.abovebar, color = color.red,   text = "SELL", textcolor = color.white, size = size.small)
+
+plot(nz(pEntry, close), title = "entry", display = display.data_window)
+plot(nz(pSL,    close), title = "sl",    display = display.data_window)
+plot(nz(pTP1,   close), title = "tp",    display = display.data_window)
+plot(nz(pTP2,   close), title = "tp2",   display = display.data_window)
+plot(nz(pTP3,   close), title = "tp3",   display = display.data_window)

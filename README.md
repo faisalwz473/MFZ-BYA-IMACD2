@@ -54,6 +54,17 @@ Alert payload (values arrive as raw numbers via `{{plot("title")}}`):
 
 `"tp"` carries TP1. Levels are matched by plot **title**, not by number, so plot order can never break the webhook.
 
+## Why the markers are labels, not plotshapes
+TradingView allows a maximum of **64 plot outputs per script**, and a `plotshape()` with a
+variable colour compiles into three outputs (shape, colour, text colour). Offering nine
+shape choices for each direction therefore cost 54 outputs on its own and tripped runtime
+error **RE10140** (`too many plots (65)`) when the script was added to a chart.
+
+Markers are drawn with `label.new()` instead. Labels are drawing objects, not plots, so the
+full shape and colour choice is preserved at zero plot cost. The script now uses 11 of the
+64 outputs. The trade-off is TradingView's 500-label cap, so markers show for roughly the
+most recent 500 signals.
+
 ## Win-rate dashboard
 Top-right table. It makes no signals of its own — it replays the indicator's own entries against the
 same SL / TP levels bar by bar across loaded history. SL before TP1 = Loss, TP1 or better = Win.
