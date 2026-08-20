@@ -29,7 +29,7 @@
 //   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
 // =============================================================================
 
-indicator(title = "MFZ BYA IMACD2", shorttitle = "MFZ BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
+indicator(title = "MFZ BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
 
 // =============================================================================
 //  INPUT GROUPS
