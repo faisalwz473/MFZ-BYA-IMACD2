@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-//  MFZ BYA IMACD2
+//  BYA IMACD1
 // -----------------------------------------------------------------------------
 //  Signal engine adapted from "Impulse MACD [LazyBear]" (open source, credit to
 //  LazyBear). The original was a lower-pane study; this version is an OVERLAY
@@ -22,14 +22,14 @@
 //      so TVMT always receives raw numbers in the exact expected field names.
 //
 //  ALERT SETUP (do this once in TradingView)
-//   Right-click chart -> Add alert -> Condition: "MFZ BYA IMACD2"
+//   Right-click chart -> Add alert -> Condition: "BYA IMACD1"
 //   -> choose "MFZ BUY (TVMT)" or "MFZ SELL (TVMT)"
 //   -> Trigger: "Once Per Bar Close"
 //   -> The Message box is pre-filled with the JSON. Do not edit it.
 //   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
 // =============================================================================
 
-indicator(title = "MFZ BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
+indicator(title = "BYA IMACD1", shorttitle = "BYA IMACD1", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
 
 // =============================================================================
 //  INPUT GROUPS
@@ -211,6 +211,23 @@ if buySignal
 else if sellSignal
     lastDir := -1
 
+// -----------------------------------------------------------------------------
+//  DIAGNOSTIC COUNTERS
+//  rawCount   = crosses the signal engine found, BEFORE any filter.
+//  firedCount = signals that survived the zone filter and the flip filter.
+//  If rawCount is 0 the cross itself never happens (md is flat). If rawCount is
+//  high but firedCount is 0, a filter is eating every signal.
+// -----------------------------------------------------------------------------
+var int rawCount   = 0
+var int firedCount = 0
+var int mdLiveBars = 0
+
+if barstate.isconfirmed
+    if rawBuy or rawSell
+        rawCount += 1
+    if md != 0.0
+        mdLiveBars += 1
+
 // =============================================================================
 //  DISTANCE ENGINES - Pip / ATR / Percentage
 // =============================================================================
@@ -235,6 +252,9 @@ var float pTP3   = na
 var int   pDir   = 0        // +1 long setup, -1 short setup
 
 bool newSignal = buySignal or sellSignal
+
+if newSignal
+    firedCount += 1
 
 if newSignal
     float entryP = close                       // entry = close of the confirmed bar
@@ -461,7 +481,7 @@ if showDash and barstate.isconfirmed
         vGotT3 := false
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 9, border_width = 1)
+var table dash = table.new(position.top_right, 2, 12, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -474,7 +494,7 @@ if barstate.islast and showDash
     float winRate = fTotal > 0 ? fWins / fTotal * 100.0 : 0.0
     color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
 
-    table.cell(dash, 0, 0, "MFZ BYA IMACD2", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 0, distMethod,       text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
@@ -492,8 +512,14 @@ if barstate.islast and showDash
     table.cell(dash, 1, 7, f_pct(t2Count, totalTrades), text_color = tp2Col, bgcolor = dashBg)
     table.cell(dash, 0, 8, "TP3 Hit",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg)
+    table.cell(dash, 0, 9, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 9, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 10, "After Filters", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 10, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 11, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 11, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 8
+    for r = 0 to 11
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)
