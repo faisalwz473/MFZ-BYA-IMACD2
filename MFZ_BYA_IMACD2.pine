@@ -45,6 +45,7 @@ G_PCT   = "2c - Percentage Settings"
 G_MARK  = "3 - Marker Style"
 G_LINE  = "4 - Line & Label Style"
 G_DASH  = "5 - Win Rate Dashboard"
+G_ALERT = "6 - Alerts"
 
 // -----------------------------------------------------------------------------
 //  1. SIGNAL ENGINE INPUTS
@@ -121,6 +122,7 @@ labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small"
 // -----------------------------------------------------------------------------
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
+alertMode  = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALERT, tooltip = "Two alerts: create one alert per condition. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker. Immune to the double-fire problem.", display = display.none)
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
@@ -229,7 +231,7 @@ bool sellRaw = rawSell and zoneSellOk and barstate.isconfirmed
 // Optional "one signal per direction" filter (wait for the opposite side).
 var int lastDir = 0
 bool buySignal  = buyRaw  and (not flipOnly or lastDir != 1)
-bool sellSignal = sellRaw and (not flipOnly or lastDir != -1)
+bool sellSignal = sellRaw and not buyRaw and (not flipOnly or lastDir != -1)   // never both on one bar
 if buySignal
     lastDir := 1
 else if sellSignal
@@ -427,6 +429,33 @@ plot(nz(pTP3,   close), title = "tp3",   display = display.none)
 alertcondition(buySignal, title = "MFZ BUY (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "buy",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"\n}')
 
 alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "sell",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-sell-{{time}}"\n}')
+
+// -----------------------------------------------------------------------------
+//  SINGLE-ALERT PATH - identical JSON, but built inside Pine.
+//  Only fires when Alert Method is "One alert (alert function)". Because the
+//  script writes the message itself, exactly ONE payload is sent per signal and
+//  its "action" always matches the marker on the chart.
+//  Set the alert up as: Condition "BYA IMACD1" -> "Any alert() function call".
+// -----------------------------------------------------------------------------
+f_json(string action) =>
+    string j = '{\n'
+    j += '  "symbol": "' + syminfo.ticker + '",\n'
+    j += '  "action": "' + action + '",\n'
+    j += '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
+    j += '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
+    j += '  "tp": '    + str.tostring(nz(pTP1,   close), format.mintick) + ',\n'
+    j += '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
+    j += '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
+    j += '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
+    j += '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
+    j += '}'
+    j
+
+if alertMode == "One alert (alert function)"
+    if buySignal
+        alert(f_json("buy"), alert.freq_once_per_bar_close)
+    else if sellSignal
+        alert(f_json("sell"), alert.freq_once_per_bar_close)
 
 // =============================================================================
 //  WIN RATE DASHBOARD
