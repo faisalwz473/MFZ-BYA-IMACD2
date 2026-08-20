@@ -1,0 +1,28 @@
+//@version=6
+// STEP 1 DIAGNOSTIC - signal engine only. Nothing else.
+// If THIS fails to attach, the problem is in the Impulse MACD engine.
+indicator("MFZ STEP1", "MFZ STEP1", overlay = true)
+
+lengthMA     = input.int(10, "MA Length (slow)")
+lengthSignal = input.int(3,  "Signal Length (fast)")
+src          = hlc3
+
+calc_smma(float s, simple int l) =>
+    ta.rma(s, l)
+
+calc_zlema(float s, simple int l) =>
+    float e1 = ta.ema(s, l)
+    float e2 = ta.ema(e1, l)
+    e1 + (e1 - e2)
+
+float hiBand = calc_smma(high, lengthMA)
+float loBand = calc_smma(low,  lengthMA)
+float mid    = calc_zlema(src, lengthMA)
+float md     = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
+float sb     = ta.sma(md, lengthSignal)
+
+bool buySignal  = ta.crossover(sb, md)  and barstate.isconfirmed
+bool sellSignal = ta.crossunder(sb, md) and barstate.isconfirmed
+
+plotshape(buySignal,  title = "BUY",  style = shape.labelup,   location = location.belowbar, color = color.green, text = "BUY",  textcolor = color.white, size = size.small)
+plotshape(sellSignal, title = "SELL", style = shape.labeldown, location = location.abovebar, color = color.red,   text = "SELL", textcolor = color.white, size = size.small)

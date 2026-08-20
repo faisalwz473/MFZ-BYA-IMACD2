@@ -283,18 +283,37 @@ if newSignal
     label.delete(lbT3)
 
     int x2 = bar_index + rightPad
-    lnE  := line.new(bar_index, pEntry, x2, pEntry, color = entryCol, width = lineWidth, style = lineStyleV)
-    lnS  := line.new(bar_index, pSL,    x2, pSL,    color = slCol,    width = lineWidth, style = lineStyleV)
-    lnT1 := line.new(bar_index, pTP1,   x2, pTP1,   color = tp1Col,   width = lineWidth, style = lineStyleV)
-    lnT2 := line.new(bar_index, pTP2,   x2, pTP2,   color = tp2Col,   width = lineWidth, style = lineStyleV)
-    lnT3 := line.new(bar_index, pTP3,   x2, pTP3,   color = tp3Col,   width = lineWidth, style = lineStyleV)
+    lnE  := line.new(bar_index, pEntry, x2, pEntry, color = entryCol)
+    lnS  := line.new(bar_index, pSL,    x2, pSL,    color = slCol)
+    lnT1 := line.new(bar_index, pTP1,   x2, pTP1,   color = tp1Col)
+    lnT2 := line.new(bar_index, pTP2,   x2, pTP2,   color = tp2Col)
+    lnT3 := line.new(bar_index, pTP3,   x2, pTP3,   color = tp3Col)
+
+    // apply the chosen style/width through the setters (safe with variables)
+    line.set_style(lnE,  lineStyleV)
+    line.set_style(lnS,  lineStyleV)
+    line.set_style(lnT1, lineStyleV)
+    line.set_style(lnT2, lineStyleV)
+    line.set_style(lnT3, lineStyleV)
+    line.set_width(lnE,  lineWidth)
+    line.set_width(lnS,  lineWidth)
+    line.set_width(lnT1, lineWidth)
+    line.set_width(lnT2, lineWidth)
+    line.set_width(lnT3, lineWidth)
 
     if showLabels
-        lbE  := label.new(x2, pEntry, f_labTxt("ENTRY", pEntry, pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = entryCol, size = labSizeV)
-        lbS  := label.new(x2, pSL,    f_labTxt("SL",    pSL,    pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = slCol,    size = labSizeV)
-        lbT1 := label.new(x2, pTP1,   f_labTxt("TP1",   pTP1,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp1Col,   size = labSizeV)
-        lbT2 := label.new(x2, pTP2,   f_labTxt("TP2",   pTP2,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp2Col,   size = labSizeV)
-        lbT3 := label.new(x2, pTP3,   f_labTxt("TP3",   pTP3,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp3Col,   size = labSizeV)
+        lbE  := label.new(x2, pEntry, f_labTxt("ENTRY", pEntry, pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = entryCol)
+        lbS  := label.new(x2, pSL,    f_labTxt("SL",    pSL,    pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = slCol)
+        lbT1 := label.new(x2, pTP1,   f_labTxt("TP1",   pTP1,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp1Col)
+        lbT2 := label.new(x2, pTP2,   f_labTxt("TP2",   pTP2,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp2Col)
+        lbT3 := label.new(x2, pTP3,   f_labTxt("TP3",   pTP3,   pEntry), style = label.style_label_left, color = color.new(color.black, 100), textcolor = tp3Col)
+
+        // apply the chosen text size through the setter (safe with variables)
+        label.set_size(lbE,  labSizeV)
+        label.set_size(lbS,  labSizeV)
+        label.set_size(lbT1, labSizeV)
+        label.set_size(lbT2, labSizeV)
+        label.set_size(lbT3, labSizeV)
 
 // Re-anchor every bar so lines stay extended and labels never scroll off screen.
 if not na(lnE)
@@ -339,11 +358,11 @@ plotshape(sellSignal and sellShape == "X Cross",       title = "Sell - X Cross",
 //  display.none keeps them off the chart; TradingView still feeds them to the
 //  alert placeholders. nz(..., close) guarantees a finite number, never na.
 // =============================================================================
-plot(nz(pEntry, close), title = "entry", display = display.none)
-plot(nz(pSL,    close), title = "sl",    display = display.none)
-plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
-plot(nz(pTP2,   close), title = "tp2",   display = display.none)
-plot(nz(pTP3,   close), title = "tp3",   display = display.none)
+plot(nz(pEntry, close), title = "entry", display = display.data_window)
+plot(nz(pSL,    close), title = "sl",    display = display.data_window)
+plot(nz(pTP1,   close), title = "tp",    display = display.data_window)   // "tp" carries TP1
+plot(nz(pTP2,   close), title = "tp2",   display = display.data_window)
+plot(nz(pTP3,   close), title = "tp3",   display = display.data_window)
 
 // =============================================================================
 //  TVMT WEBHOOK ALERTS - exact JSON, nothing else in the message box.
@@ -443,21 +462,26 @@ if barstate.islast and showDash
     float winRate = fTotal > 0 ? fWins / fTotal * 100.0 : 0.0
     color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
 
-    table.cell(dash, 0, 0, "MFZ BYA IMACD2", text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 0, distMethod,       text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 2, str.tostring(winCount), text_color = dashWinCol, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 3, "Losses",   text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 3, str.tostring(lossCount), text_color = dashLosCol, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 4, "Win Rate", text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 4, str.tostring(winRate, "#.#") + " %", text_color = rateCol, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 5, "SL Hit",   text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 5, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 6, "TP1 Hit",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 6, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 7, "TP2 Hit",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 7, f_pct(t2Count, totalTrades), text_color = tp2Col, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 0, 8, "TP3 Hit",  text_color = dashTxt, bgcolor = dashBg, text_size = dashSizeV)
-    table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg, text_size = dashSizeV)
+    table.cell(dash, 0, 0, "MFZ BYA IMACD2", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 0, distMethod,       text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 2, str.tostring(winCount), text_color = dashWinCol, bgcolor = dashBg)
+    table.cell(dash, 0, 3, "Losses",   text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 3, str.tostring(lossCount), text_color = dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 4, "Win Rate", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 4, str.tostring(winRate, "#.#") + " %", text_color = rateCol, bgcolor = dashBg)
+    table.cell(dash, 0, 5, "SL Hit",   text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 5, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg)
+    table.cell(dash, 0, 6, "TP1 Hit",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 6, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg)
+    table.cell(dash, 0, 7, "TP2 Hit",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 7, f_pct(t2Count, totalTrades), text_color = tp2Col, bgcolor = dashBg)
+    table.cell(dash, 0, 8, "TP3 Hit",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg)
+
+    // apply the chosen dashboard text size to every cell (safe with variables)
+    for r = 0 to 8
+        for c = 0 to 1
+            table.cell_set_text_size(dash, c, r, dashSizeV)
