@@ -805,7 +805,7 @@ if showDash and barstate.isconfirmed
         vMAE   := 0.0
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 22, border_width = 1)
+var table dash = table.new(position.top_right, 2, 24, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -852,6 +852,21 @@ if barstate.islast and showDash
         int n90 = array.size(tmp)
         int i90 = math.max(0, math.min(n90 - 1, int(math.ceil(0.90 * n90)) - 1))
         maeP90 := array.get(tmp, i90)
+
+    // THE EDGE TEST.
+    // A driftless random entry with a stop at distance a and a target at
+    // distance b hits the target first with probability a / (a + b). That is
+    // the win rate a coin flip produces with YOUR levels, and it is the bar any
+    // signal must clear to be worth anything at all.
+    //
+    // The consequence is easy to miss: a zero-edge entry has exactly ZERO
+    // expectancy at EVERY SL/TP ratio, so if this row is not positive, no
+    // amount of retuning stops and targets can help - there is nothing there to
+    // optimise, and the spread turns the coin flip into a guaranteed loss.
+    // Fix the signal, not the levels.
+    float randWR  = distOk ? 100.0 * slDist / (slDist + tpDist) : na
+    float edgePP  = na(randWR) ? na : winRate - randWR
+    color edgeCol = not na(edgePP) and edgePP > 0.0 ? dashWinCol : dashLosCol
 
     // Win rate this payoff needs to break even, INCLUDING the cost.
     // p = (1 + cost) / (1 + tp), all in R.
@@ -909,8 +924,15 @@ if barstate.islast and showDash
     // both in R and as the distance to type into group 2 and into TVMT.
     table.cell(dash, 0, 21, "MAE p90 -> SL", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 21, na(maeP90) or not distOk ? "-" : str.tostring(maeP90, "#.##") + "R = " + str.tostring(maeP90 * slDist / pipPrice, "#") + "p", text_color = dashTxt, bgcolor = dashBg)
+    // Coin-flip win rate for these exact levels: SL / (SL + TP).
+    table.cell(dash, 0, 22, "Random WR", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 22, na(randWR) ? "-" : str.tostring(randWR, "#.#") + " %", text_color = dashTxt, bgcolor = dashBg)
+    // THE row. Not positive here means the signal adds nothing over a coin flip,
+    // and no stop/target tuning can rescue it.
+    table.cell(dash, 0, 23, "EDGE vs rnd", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 23, na(edgePP) ? "-" : (edgePP >= 0.0 ? "+" : "") + str.tostring(edgePP, "#.#") + " pp", text_color = edgeCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 21
+    for r = 0 to 23
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)

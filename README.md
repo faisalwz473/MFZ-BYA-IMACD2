@@ -17,6 +17,45 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## The edge test — read this row before any other
+
+A driftless random entry with a stop at distance `a` and a target at distance `b` hits the
+target first with probability `a / (a + b)`. That is the win rate a **coin flip** produces
+with your exact levels, and it is the bar any signal has to clear to be worth anything.
+
+The dashboard reports it as **Random WR**, and **EDGE vs rnd** is your win rate minus it.
+
+The consequence is the important part, and it is easy to miss:
+
+> A zero-edge entry has **exactly zero expectancy at every SL/TP ratio**. If `EDGE vs rnd`
+> is not positive, no amount of retuning stops and targets can help — there is nothing
+> there to optimise — and the spread turns the coin flip into a guaranteed loss.
+> **Fix the signal, not the levels.**
+
+### What this repository measured
+
+XAUUSD 15m, SL 500 / TP1 700, so `Random WR` = 500/1200 = **41.7 %**:
+
+| | Win Rate | vs random | Reading |
+|---|---|---|---|
+| Before the entry guards | 36.3 % | **−5.4 pp** | worse than a coin flip — entries were systematically late |
+| After the entry guards | 40.7 % | **−1.0 pp** | indistinguishable from a coin flip (n=632, z=−0.49) |
+
+The guards did what they were designed to do: they removed a **negative** edge worth
++0.106 R. What they could not do is create a positive one, because the Impulse MACD cross
+did not have one on this market and timeframe.
+
+That single fact explains every dead end:
+
+- **Widening the target failed** — zero edge pays zero at any ratio.
+- **Tightening the stop to MAE p90 failed** — same reason; the dropped winners cost more
+  than the improved reward-to-risk gained.
+- **MAE p90 came in at 0.89 R** — winners survive nearly a full stop of heat, which is what
+  aimless trades look like, not well-timed ones.
+
+With no edge, expectancy lands at exactly the cost: **−0.060 R**, and the measured
+−0.083 R sits within noise of it.
+
 ## Measured result of the entry-timing fix
 
 XAUUSD 15m, SL 500 / TP1 700, same history before and after (`Bars md != 0` 13684 vs
