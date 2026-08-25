@@ -57,6 +57,7 @@ G_MARK  = "3 - Marker Style"
 G_LINE  = "4 - Line & Label Style"
 G_DASH  = "5 - Win Rate Dashboard"
 G_ALERT = "6 - Alerts"
+G_EXEC  = "7 - Execution Model (mirror TVMT)"
 
 // -----------------------------------------------------------------------------
 //  1. SIGNAL ENGINE INPUTS
@@ -165,6 +166,16 @@ labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small"
 levelSrc   = input.string("Indicator sends SL / TP to TVMT", "Who Sets SL / TP", options = ["Indicator sends SL / TP to TVMT", "TVMT Trading Setup (indicator levels are display only)"], group = G_ALERT, tooltip = "CHECK THIS AGAINST YOUR TVMT TRADING SETUP PAGE.\nIf TVMT applies its own SL/TP, the levels this script draws are NOT the ones being traded, and the win rate dashboard is measuring a different strategy from your account.\nEither way the fix is the same: type the SAME distances into group 2 that TVMT uses, so chart, dashboard and account all agree.\nTVMT mode drops entry/sl/tp/tp2/tp3 from the payload so there is no ambiguity about which side wins. Applies to the One alert (alert function) method only - alertcondition() messages must be compile-time constants, so the two-alert path always sends levels.", display = display.none)
 jsonBraces = input.bool(true, "Wrap Alert JSON In Outer Braces", group = G_ALERT, tooltip = "The TVMT portal shows its own template WITHOUT the outer { } and notes that this stops TradingView flagging the message as JSON. Your current setup sends them and is executing fine, so this defaults to ON - untick it only if TVMT starts rejecting payloads.\nApplies to the One alert (alert function) method only: TradingView requires alertcondition() messages to be compile-time constants, so the two-alert path is always braced.", display = display.none)
 alertMode  = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALERT, tooltip = "Two alerts: create one alert per condition. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker. Immune to the double-fire problem.", display = display.none)
+// -----------------------------------------------------------------------------
+//  7. EXECUTION MODEL
+//  The dashboard is only worth reading if it exits trades the way TVMT does.
+//  Set these to match your TVMT Trading Setup page exactly.
+// -----------------------------------------------------------------------------
+exitModel = input.string("Single TP (TVMT ladder OFF)", "Exit Model", options = ["Single TP (TVMT ladder OFF)", "TP ladder 33/33/34 (TVMT ladder ON)"], group = G_EXEC, tooltip = "Single TP: TVMT's Take-Profit Ladder is OFF, so the whole position closes at the alert's tp (TP1) and tp2/tp3 are ignored. Every trade is binary - SL or TP1.\nTP ladder: TVMT's ladder is ON, so the position scales out 33/33/34 at TP1/TP2/TP3 and the stop moves to breakeven at TP1.", display = display.none)
+simBE     = input.bool(false, "Simulate Auto Breakeven", group = G_EXEC, tooltip = "Mirrors TVMT's Auto Breakeven block. Turn this on here FIRST and read the expectancy, then decide whether to turn it on in TVMT. In ladder mode the stop always moves to breakeven at TP1, exactly as TVMT does.", display = display.none)
+beTrigR   = input.float(0.4, "Breakeven Trigger (x SL distance)", minval = 0.05, step = 0.05, group = G_EXEC, tooltip = "Expressed as a fraction of your stop distance so it is unit-free. TVMT states this in ITS pips, which may not equal this script's pip - 0.4 here means 40% of the way to a full stop loss in profit.", display = display.none)
+beOffR    = input.float(0.0, "Breakeven SL Offset (x SL distance)", minval = 0.0, step = 0.05, group = G_EXEC, tooltip = "Where the stop lands once breakeven arms. 0 = exactly at entry.", display = display.none)
+
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
@@ -625,55 +636,111 @@ var float vSL    = na
 var float vT1    = na
 var float vT2    = na
 var float vT3    = na
+var float vR     = na       // one R = the stop distance of this trade
 var bool  vGotT1 = false
 var bool  vGotT2 = false
 var bool  vGotT3 = false
+var bool  vArmed = false    // stop has been moved to breakeven
+var float vBank  = 0.0      // R already realised from partial exits
 
-var int totalTrades = 0
-var int winCount    = 0
-var int lossCount   = 0
-var int slCount     = 0
-var int t1Count     = 0
-var int t2Count     = 0
-var int t3Count     = 0
+var int   totalTrades = 0
+var int   winCount    = 0
+var int   lossCount   = 0
+var int   slCount     = 0
+var int   t1Count     = 0
+var int   t2Count     = 0
+var int   t3Count     = 0
+var float sumR        = 0.0 // total R across every closed trade
+
+bool ladderOn = exitModel == "TP ladder 33/33/34 (TVMT ladder ON)"
+
+// NOTE: a Pine user-defined function may read globals but may NOT assign to
+// them, so the trade accounting cannot be factored into a helper. Each branch
+// below sets bookR and done, and the booking happens once afterwards.
 
 if showDash and barstate.isconfirmed
     // ---- 1) walk the open virtual trade forward with this bar's range ----
     if vDir != 0
-        bool slHit = vDir == 1 ? low  <= vSL : high >= vSL
+        // R multiples of each target, so every trade is scored on one scale.
+        float r1 = (vT1 - vEntry) * vDir / vR
+        float r2 = (vT2 - vEntry) * vDir / vR
+        float r3 = (vT3 - vEntry) * vDir / vR
+
+        float beSL  = vEntry + vDir * beOffR * vR
+        float curSL = vArmed ? beSL : vSL
+
+        bool slHit = vDir == 1 ? low  <= curSL : high >= curSL
         bool t1Hit = vDir == 1 ? high >= vT1 : low  <= vT1
         bool t2Hit = vDir == 1 ? high >= vT2 : low  <= vT2
         bool t3Hit = vDir == 1 ? high >= vT3 : low  <= vT3
 
         // Same-bar ambiguity: assume the level nearer to the open was hit first.
-        bool slFirst = slHit and t1Hit ? math.abs(open - vSL) <= math.abs(open - vT1) : slHit
+        bool slFirst = slHit and t1Hit ? math.abs(open - curSL) <= math.abs(open - vT1) : slHit
+        bool  done  = false
+        float bookR = 0.0
 
-        if slFirst and not vGotT1
-            totalTrades += 1
-            lossCount   += 1
-            slCount     += 1
-            vDir := 0
-        else
-            if t1Hit and not vGotT1
-                vGotT1 := true
+        if not ladderOn
+            // TVMT ladder OFF: the whole position closes at the alert's tp.
+            // tp2 and tp3 are never sent to the broker, so they cannot be hit.
+            if slFirst
+                if not vArmed
+                    slCount += 1
+                bookR := vArmed ? beOffR : -1.0
+                done  := true
+            else if t1Hit
                 t1Count += 1
-            if t2Hit and not vGotT2 and vGotT1
-                vGotT2 := true
-                t2Count += 1
-            if t3Hit and not vGotT3 and vGotT2
-                vGotT3 := true
-                t3Count += 1
-            // Trade is finished once TP3 is done, or SL comes back after TP1.
-            if vGotT3 or (slHit and vGotT1)
-                totalTrades += 1
-                winCount    += 1
-                vDir := 0
+                bookR := r1
+                done  := true
+        else
+            // TVMT ladder ON: scale out 33/33/34, stop to breakeven at TP1.
+            if slFirst and not vGotT1
+                slCount += 1
+                bookR := -1.0
+                done  := true
+            else
+                if t1Hit and not vGotT1
+                    vGotT1 := true
+                    t1Count += 1
+                    vBank  += 0.33 * r1
+                    vArmed := true
+                if t2Hit and not vGotT2 and vGotT1
+                    vGotT2 := true
+                    t2Count += 1
+                    vBank  += 0.33 * r2
+                if t3Hit and not vGotT3 and vGotT2
+                    vGotT3 := true
+                    t3Count += 1
+                    vBank  += 0.34 * r3
+                    bookR  := vBank
+                    done   := true
+                if not done and slHit and vGotT1
+                    bookR := vBank
+                    done  := true
+
+        if done
+            totalTrades += 1
+            sumR        += bookR
+            if bookR > 0.0
+                winCount += 1
+            else
+                lossCount += 1
+            vDir := 0
+        else if simBE and not vArmed
+            // Breakeven arms at the close of the bar that reached the trigger,
+            // so it can only protect from the NEXT bar onwards.
+            float trigP = vEntry + vDir * beTrigR * vR
+            if vDir == 1 ? high >= trigP : low <= trigP
+                vArmed := true
 
     // ---- 2) a new signal closes any open virtual trade and opens the next ----
+    // TVMT is set to "Close and reverse", so the remainder exits at market.
     if newSignal
         if vDir != 0
+            float held  = 1.0 - ((vGotT1 ? 0.33 : 0.0) + (vGotT2 ? 0.33 : 0.0) + (vGotT3 ? 0.34 : 0.0))
+            float revR  = vBank + (close - vEntry) * vDir / vR * held
             totalTrades += 1
-            if vGotT1
+            sumR        += revR
+            if revR > 0.0
                 winCount += 1
             else
                 lossCount += 1
@@ -683,12 +750,15 @@ if showDash and barstate.isconfirmed
         vT1    := pTP1
         vT2    := pTP2
         vT3    := pTP3
+        vR     := math.max(math.abs(pEntry - pSL), syminfo.mintick)  // never divide by zero
         vGotT1 := false
         vGotT2 := false
         vGotT3 := false
+        vArmed := false
+        vBank  := 0.0
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 16, border_width = 1)
+var table dash = table.new(position.top_right, 2, 18, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -701,8 +771,13 @@ if barstate.islast and showDash
     float winRate = fTotal > 0 ? fWins / fTotal * 100.0 : 0.0
     color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
 
+    // EXPECTANCY is the number that decides everything. A 36% win rate is fine
+    // at 3R and fatal at 1.4R, so win rate alone cannot tell you if this works.
+    float expR    = fTotal > 0 ? sumR / fTotal : 0.0
+    color expCol  = expR > 0.0 ? dashWinCol : dashLosCol
+
     table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 0, distMethod + (sendLevels ? " IND" : " TVMT"), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 0, (ladderOn ? "LADDER" : "1-TP") + (sendLevels ? " IND" : " TVMT"), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg)
@@ -711,32 +786,37 @@ if barstate.islast and showDash
     table.cell(dash, 1, 3, str.tostring(lossCount), text_color = dashLosCol, bgcolor = dashBg)
     table.cell(dash, 0, 4, "Win Rate", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 4, str.tostring(winRate, "#.#") + " %", text_color = rateCol, bgcolor = dashBg)
-    table.cell(dash, 0, 5, "SL Hit",   text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 5, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg)
-    table.cell(dash, 0, 6, "TP1 Hit",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 6, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg)
-    table.cell(dash, 0, 7, "TP2 Hit",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 7, f_pct(t2Count, totalTrades), text_color = tp2Col, bgcolor = dashBg)
-    table.cell(dash, 0, 8, "TP3 Hit",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg)
-    table.cell(dash, 0, 9, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 9, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 10, "Blk T/E/C", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 10, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool), text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 0, 11, "Armed", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 11, str.tostring(armedCount), text_color = armedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 12, "Filled", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 12, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 13, "Expired", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 13, str.tostring(expiredCount), text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 0, 14, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 14, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    // The distances the dashboard is actually scoring. If TVMT owns SL/TP, these
-    // MUST match the Trading Setup page or the win rate below is fiction.
-    table.cell(dash, 0, 15, sendLevels ? "SL/TP1 px" : "MATCH TVMT", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 15, na(pEntry) ? "-" : str.tostring(math.abs(pEntry - pSL), format.mintick) + " / " + str.tostring(math.abs(pTP1 - pEntry), format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 5, "Expectancy", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 5, str.tostring(expR, "#.###") + " R", text_color = expCol, bgcolor = dashBg)
+    table.cell(dash, 0, 6, "Total R",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 6, str.tostring(sumR, "#.#") + " R", text_color = sumR > 0.0 ? dashWinCol : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 7, "SL Hit",   text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 7, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg)
+    table.cell(dash, 0, 8, "TP1 Hit",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 8, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg)
+    // TP2/TP3 stay at zero while the exit model is Single TP - that is correct,
+    // TVMT never sends those targets to the broker when its ladder is off.
+    table.cell(dash, 0, 9, "TP2 Hit",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 9, ladderOn ? f_pct(t2Count, totalTrades) : "off", text_color = tp2Col, bgcolor = dashBg)
+    table.cell(dash, 0, 10, "TP3 Hit", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 10, ladderOn ? f_pct(t3Count, totalTrades) : "off", text_color = tp3Col, bgcolor = dashBg)
+    table.cell(dash, 0, 11, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 11, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 12, "Blk T/E/C", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 12, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 13, "Armed",   text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 13, str.tostring(armedCount), text_color = armedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 14, "Filled",  text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 14, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 15, "Expired", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 15, str.tostring(expiredCount), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 16, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 16, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    // The distances actually being scored. These must equal your TVMT setup.
+    table.cell(dash, 0, 17, distMethod + " SL/TP1", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 17, na(pEntry) ? "-" : str.tostring(math.abs(pEntry - pSL), format.mintick) + "/" + str.tostring(math.abs(pTP1 - pEntry), format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 15
+    for r = 0 to 17
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)

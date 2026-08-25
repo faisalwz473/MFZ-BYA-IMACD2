@@ -91,6 +91,43 @@ Change one input at a time and re-read the table.
 - Every marker shape, marker colour and line colour is an input.
 - Every input uses `display = display.none`, so the chart status line shows only the indicator name.
 
+## Matching the dashboard to TVMT
+
+`Follow the alert's SL/TP` = **ON** in TVMT means the indicator's levels are the ones
+traded, and TVMT's own SL 80 / TP 50 pips are only a fallback for alerts that omit them.
+So the levels agree. What does **not** agree by default is the **exit model**.
+
+With TVMT's **Take-Profit Ladder OFF**, `tp2` and `tp3` are never sent to the broker. The
+whole position closes at the single `tp` value — every trade is binary, SL or TP1. A
+dashboard that keeps walking a trade up to TP2 and TP3 is scoring exits that cannot happen.
+
+Group **7 - Execution Model (mirror TVMT)** fixes that:
+
+| Input | Set it to | Mirrors |
+|---|---|---|
+| Exit Model | `Single TP (TVMT ladder OFF)` | Take-Profit Ladder OFF — the default, and what is running today |
+| | `TP ladder 33/33/34 (TVMT ladder ON)` | Take-Profit Ladder ON, with SL to breakeven at TP1 |
+| Simulate Auto Breakeven | off | Auto Breakeven OFF |
+| Breakeven Trigger (x SL distance) | 0.4 | Auto Breakeven trigger, as a fraction of the stop |
+| Breakeven SL Offset (x SL distance) | 0.0 | SL offset from entry |
+
+The breakeven trigger is expressed as a **fraction of the stop distance**, not in pips,
+because TVMT's pip for gold is not necessarily this script's pip. `0.4` means "40% of the
+way to a full stop loss, in profit".
+
+### Expectancy is the number that matters
+
+The dashboard now reports **Expectancy (R)** and **Total R**. Win rate on its own cannot
+tell you whether a system works — 36% is excellent at 3R and fatal at 1.4R. Read the
+expectancy row first; everything else is diagnosis.
+
+`Total R` is the sum of every closed trade in R. Multiply it by your risk per trade to get
+the currency result the account should have produced.
+
+The header cell shows the active configuration at a glance: `1-TP IND` means single-TP
+exits with the indicator supplying levels; `LADDER TVMT` means scale-out exits with TVMT
+owning the levels.
+
 ## Who owns SL / TP — read this before trusting the dashboard
 
 TVMT's **Trading Setup** page can apply its own SL/TP to every trade. When it does, the
