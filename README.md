@@ -17,6 +17,59 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## Using this as an edge screener
+
+The harness is now the valuable part. Timing guards, pullback entry, levels, alerts,
+cost accounting and the edge test are all shared, so any entry rule can be dropped in and
+measured under identical conditions in about two minutes.
+
+**Signal Mode** (group 1) carries eight engines. The first four are the original Impulse
+MACD variants — all reskins of one lagging crossover. The last four are deliberately
+different families, chosen so the edge test has something new to measure:
+
+| Engine | Family | Idea |
+|---|---|---|
+| `Donchian Breakout` | trend following | price takes out an N-bar extreme |
+| `RSI Reversal` | mean reversion | fires as price *leaves* an extreme, not while it sits there |
+| `Keltner Squeeze Breakout` | volatility expansion | Bollinger inside Keltner coils, signal on the release |
+| `Bar Thrust` | range expansion | unusually large bar closing near its extreme |
+
+Their parameters live in group **1c**.
+
+> **Screening the two breakout engines:** a breakout *is* extended by definition, so the
+> extension filter in group 1b will reject most of them. Raise `Max Distance From Mid
+> Line` to 3.0+ or untick it when testing those two.
+
+### The screening procedure
+
+1. Pick an engine in Signal Mode. Leave everything else alone.
+2. Read **`Edge sigma`** — nothing else.
+3. Below 2.0 it says `noise`. Reject it and move on. Do not tune it, do not look at
+   expectancy, do not keep it because the win rate looked nice.
+4. Only if it clears 2 sigma is it worth tuning — and then re-test on a different symbol
+   or date range before believing it.
+
+`Engine` at the bottom of the table names the active mode, so screenshots are
+self-labelling.
+
+### Why sigma and not the pp figure
+
+With a few hundred trades, an edge of a few points is ordinary luck:
+
+| Trades | Win rate vs random | Edge | Sigma | Verdict |
+|---|---|---|---|---|
+| 150 | 48.0 % vs 41.7 % | **+6.3 pp** | 1.56 | noise |
+| 632 | 45.0 % vs 41.7 % | +3.3 pp | 1.68 | noise |
+| 2000 | 43.5 % vs 41.7 % | +1.8 pp | 1.63 | noise |
+| 632 | 40.7 % vs 41.7 % | −1.0 pp | −0.51 | noise (the Impulse MACD) |
+
+That first row is the trap: a **+6.3 pp** edge that is pure chance. Screening on the pp
+figure finds a winner in almost any small sample. Screening on sigma does not.
+
+Testing many engines makes this worse, not better — try twenty and one will show 2 sigma
+by luck alone. Treat a single pass as a reason to test again on fresh data, never as a
+result.
+
 ## The edge test — read this row before any other
 
 A driftless random entry with a stop at distance `a` and a target at distance `b` hits the

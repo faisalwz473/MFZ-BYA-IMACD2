@@ -49,6 +49,7 @@ indicator(title = "BYA IMACD1", shorttitle = "BYA IMACD1", overlay = true, max_l
 // =============================================================================
 G_SIG   = "1 - Signal Engine (Impulse MACD)"
 G_TIME  = "1b - Entry Timing (Late Entry Fix)"
+G_ALT   = "1c - Alternative Signal Engines"
 G_DIST  = "2 - Distance Method (SL / TP)"
 G_PIP   = "2a - Pip Settings"
 G_ATR   = "2b - ATR Settings"
@@ -65,7 +66,7 @@ G_EXEC  = "7 - Execution Model (mirror TVMT)"
 lengthMA     = input.int(10, "Impulse MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Drives the Impulse MACD line (md). Default = 10. LazyBear original used 34.", display = display.none)
 lengthSignal = input.int(3, "Signal Line Length (fast line)", minval = 1, group = G_SIG, tooltip = "Drives the signal line (sb). Default = 3. LazyBear original used 9.", display = display.none)
 srcInput     = input.source(hlc3, "Price Source", group = G_SIG, display = display.none)
-signalMode   = input.string("MACD crosses Signal Line", "Signal Mode", options = ["MACD crosses Signal Line", "Signal Line crosses MACD", "Fast MA crosses Slow MA (price)", "Zero Line Cross"], group = G_SIG, tooltip = "MACD crosses Signal Line (default): the Impulse MACD crossing UP through its signal line = BUY. This matches price direction.\nSignal Line crosses MACD: the reverse orientation, reads backwards against price.\nFast MA crosses Slow MA (price): EMA(3) over EMA(10) on price = BUY.\nZero Line Cross: the Impulse MACD turning positive = BUY.", display = display.none)
+signalMode   = input.string("MACD crosses Signal Line", "Signal Mode", options = ["MACD crosses Signal Line", "Signal Line crosses MACD", "Fast MA crosses Slow MA (price)", "Zero Line Cross", "Donchian Breakout", "RSI Reversal", "Keltner Squeeze Breakout", "Bar Thrust"], group = G_SIG, tooltip = "MACD crosses Signal Line (default): the Impulse MACD crossing UP through its signal line = BUY. This matches price direction.\nSignal Line crosses MACD: the reverse orientation, reads backwards against price.\nFast MA crosses Slow MA (price): EMA(3) over EMA(10) on price = BUY.\nZero Line Cross: the Impulse MACD turning positive = BUY.", display = display.none)
 invertSig    = input.bool(false, "Invert Buy / Sell", group = G_SIG, tooltip = "Emergency flip. If every marker is on the wrong side, tick this and BUY becomes SELL and SELL becomes BUY, in whichever mode you are using.", display = display.none)
 showMAs      = input.bool(false, "Show The Two MAs On Chart", group = G_SIG, tooltip = "Only draws in Fast MA / Slow MA mode, so you can see the crossover on price.", display = display.none)
 fastMACol    = input.color(color.aqua, "Fast MA Colour", group = G_SIG, display = display.none)
@@ -98,12 +99,39 @@ usePullback = input.bool(true, "Wait For Pullback Before Entry", group = G_TIME,
 pbAtr       = input.float(0.5, "Pullback Depth (x ATR)", minval = 0.0, step = 0.1, group = G_TIME, tooltip = "How far back price must come before the entry is accepted. 0 = fill on the next bar that trades back to the cross bar close.", display = display.none)
 pbBars      = input.int(6, "Pullback Window (bars)", minval = 1, group = G_TIME, tooltip = "How long the armed signal waits for its pullback. Expires afterwards and nothing is sent. Raise it if Expired is much larger than Filled.", display = display.none)
 entryRef    = input.string("Fill bar close (market order)", "Entry Price Sent To TVMT", options = ["Fill bar close (market order)", "Pullback level (pending limit order)"], group = G_TIME, tooltip = "Fill bar close: the honest price for a MARKET order sent at bar close. Use this unless your TVMT bridge places pending orders.\nPullback level: sends the exact retrace price, which is only correct if TVMT places a pending LIMIT order.", display = display.none)
+ALT_NOTE = "See group 1c for the alternative engines."
 useSession  = input.bool(false, "Trade Only Inside A Session", group = G_TIME, tooltip = "Gold is thin and mean-reverting outside London/New York, which is exactly where a momentum crossover bleeds. Off by default - turn it on and read the expectancy before keeping it.", display = display.none)
 sessSpec    = input.session("0700-2000", "Session (exchange time unless a timezone is set below)", group = G_TIME, tooltip = "Default 0700-2000 covers the London open through the New York afternoon.", display = display.none)
 sessTz      = input.string("GMT+0", "Session Timezone", group = G_TIME, tooltip = "Timezone the session above is expressed in, e.g. GMT+0, GMT-5, GMT+8. Check your chart's clock before trusting this filter.", display = display.none)
 coolBars    = input.int(10, "Cooldown After A Signal (bars)", minval = 0, group = G_TIME, tooltip = "Minimum bars between two accepted signals. This is what stops the machine-gun clusters of three SELLs in four bars.", display = display.none)
 useMinSl    = input.bool(false, "Floor The Stop At A Minimum ATR Distance", group = G_TIME, tooltip = "Widens the stop whenever your fixed pip distance is tighter than normal noise for the current volatility. On XAUUSD 15m a 500 pip (5.00) stop is only about 1 ATR, which ordinary chop takes out. Turn on and compare.", display = display.none)
 minSlAtr    = input.float(1.5, "Minimum Stop Distance (x ATR)", minval = 0.1, step = 0.1, group = G_TIME, tooltip = "Only applies when the floor above is enabled, and it can only widen the stop, never tighten it. Take profits are left where you set them, so this lowers R:R - check the dashboard before keeping it.", display = display.none)
+
+// -----------------------------------------------------------------------------
+//  1c. ALTERNATIVE SIGNAL ENGINES
+//  The four Impulse MACD modes are all variants of one lagging crossover, and
+//  a crossover of a smoothed series against its own average carries no
+//  directional information on XAUUSD 15m - measured at -1.0 pp against a coin
+//  flip over 632 trades. These are genuinely DIFFERENT families, so that the
+//  EDGE vs rnd row has something new to measure rather than a reskin.
+//
+//  Pick one in "Signal Mode" (group 1). Everything downstream - the timing
+//  guards, the pullback entry, levels, alerts, the dashboard - is shared, so
+//  each engine is screened under identical conditions.
+//
+//  NOTE for the two breakout engines: a breakout IS extended by definition, so
+//  the extension filter in group 1b will reject most of them. Raise "Max
+//  Distance From Mid Line" to 3.0+ or untick the filter when screening those.
+// -----------------------------------------------------------------------------
+donchLen   = input.int(20, "Donchian: Channel Length (bars)", minval = 2, group = G_ALT, tooltip = "Buy when price closes above the highest high of the last N bars, sell below the lowest low. Trend following - a different family from a crossover.", display = display.none)
+rsiLen     = input.int(14, "RSI: Length", minval = 2, group = G_ALT, display = display.none)
+rsiOS      = input.float(30.0, "RSI: Oversold Level", minval = 1.0, maxval = 50.0, group = G_ALT, tooltip = "Buy when RSI crosses back UP through this level - mean reversion, the opposite family to a trend cross.", display = display.none)
+rsiOB      = input.float(70.0, "RSI: Overbought Level", minval = 50.0, maxval = 99.0, group = G_ALT, display = display.none)
+sqzLen     = input.int(20, "Squeeze: Length", minval = 2, group = G_ALT, tooltip = "Bollinger bands inside Keltner channels = a volatility squeeze. The signal fires when the squeeze RELEASES, with direction taken from momentum.", display = display.none)
+sqzBbMult  = input.float(2.0, "Squeeze: Bollinger Multiplier", minval = 0.1, step = 0.1, group = G_ALT, display = display.none)
+sqzKcMult  = input.float(1.5, "Squeeze: Keltner Multiplier", minval = 0.1, step = 0.1, group = G_ALT, display = display.none)
+thrAtr     = input.float(1.2, "Thrust: Minimum Bar Range (x ATR)", minval = 0.1, step = 0.1, group = G_ALT, tooltip = "Range expansion. The bar must be unusually large AND close near its extreme, which is what real participation looks like.", display = display.none)
+thrClose   = input.float(0.70, "Thrust: Close Within Top/Bottom Fraction", minval = 0.5, maxval = 1.0, step = 0.05, group = G_ALT, display = display.none)
 
 // -----------------------------------------------------------------------------
 //  2. DISTANCE METHOD INPUTS  (Pip / ATR / Percentage - trader picks one)
@@ -225,6 +253,9 @@ float mid    = calc_zlema(srcInput, lengthMA) // zero-lag mid line
 float md = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
 float sb = ta.sma(md, lengthSignal)          // signal line
 
+// Declared here because the alternative engines below need it too.
+float atrVal = ta.atr(atrLength)
+
 // -----------------------------------------------------------------------------
 //  RAW SIGNALS - one pair per mode, the dropdown picks which pair is used
 //
@@ -267,8 +298,62 @@ float slowMA = ta.ema(srcInput, lengthMA)
 // ZERO LINE: Impulse MACD turning positive = BUY.
 [zeroUp, zeroDn] = f_signFlip(md, barstate.isconfirmed)
 
-bool modeUp = signalMode == "Zero Line Cross" ? zeroUp : signalMode == "MACD crosses Signal Line" ? macdUp : signalMode == "Fast MA crosses Slow MA (price)" ? maUp : sigUp
-bool modeDn = signalMode == "Zero Line Cross" ? zeroDn : signalMode == "MACD crosses Signal Line" ? macdDn : signalMode == "Fast MA crosses Slow MA (price)" ? maDn : sigDn
+// -----------------------------------------------------------------------------
+//  ALTERNATIVE ENGINES - genuinely different families, not reskins of the cross
+//  Each produces a one-bar EVENT, so it plugs into the same pipeline unchanged.
+// -----------------------------------------------------------------------------
+
+// 1) DONCHIAN BREAKOUT - trend following. Price takes out an N-bar extreme.
+//    [1] on the channel so the current bar cannot be part of its own range.
+float dcHi = ta.highest(high, donchLen)[1]
+float dcLo = ta.lowest(low, donchLen)[1]
+bool dcUp = ta.crossover(close, dcHi)
+bool dcDn = ta.crossunder(close, dcLo)
+
+// 2) RSI REVERSAL - mean reversion, the opposite family. Fires as price leaves
+//    the extreme, not while it sits in it, so it cannot bleed inside a trend.
+float rsiVal = ta.rsi(close, rsiLen)
+bool rsiUp = ta.crossover(rsiVal, rsiOS)
+bool rsiDn = ta.crossunder(rsiVal, rsiOB)
+
+// 3) KELTNER SQUEEZE BREAKOUT - volatility expansion (the TTM squeeze idea).
+//    Bollinger inside Keltner = coiled. The signal is the RELEASE, with
+//    direction taken from where momentum is pointing as it lets go.
+float sqzBasis = ta.sma(close, sqzLen)
+float sqzBbDev = sqzBbMult * ta.stdev(close, sqzLen)
+float sqzKcDev = sqzKcMult * ta.rma(ta.tr(true), sqzLen)
+bool squeezeOn = sqzBbDev < sqzKcDev
+bool sqzRelease = not squeezeOn and squeezeOn[1]
+float sqzMom = ta.linreg(close - math.avg(math.avg(ta.highest(high, sqzLen), ta.lowest(low, sqzLen)), sqzBasis), sqzLen, 0)
+bool sqzUp = sqzRelease and sqzMom > 0.0
+bool sqzDn = sqzRelease and sqzMom < 0.0
+
+// 4) BAR THRUST - range expansion. The bar must be unusually large AND close
+//    near its extreme, which is what genuine participation looks like.
+float thrRange = high - low
+bool thrBig = thrRange > thrAtr * nz(atrVal, 0.0) and thrRange > 0.0
+bool thrUp = thrBig and close > open and (close - low) / thrRange >= thrClose
+bool thrDn = thrBig and close < open and (high - close) / thrRange >= thrClose
+
+bool modeUp = switch signalMode
+    "Zero Line Cross"                 => zeroUp
+    "MACD crosses Signal Line"        => macdUp
+    "Fast MA crosses Slow MA (price)" => maUp
+    "Donchian Breakout"               => dcUp
+    "RSI Reversal"                    => rsiUp
+    "Keltner Squeeze Breakout"        => sqzUp
+    "Bar Thrust"                      => thrUp
+    => sigUp
+
+bool modeDn = switch signalMode
+    "Zero Line Cross"                 => zeroDn
+    "MACD crosses Signal Line"        => macdDn
+    "Fast MA crosses Slow MA (price)" => maDn
+    "Donchian Breakout"               => dcDn
+    "RSI Reversal"                    => rsiDn
+    "Keltner Squeeze Breakout"        => sqzDn
+    "Bar Thrust"                      => thrDn
+    => sigDn
 
 // Master invert. Swaps the two sides in whichever mode is selected.
 bool rawBuy  = invertSig ? modeDn : modeUp
@@ -293,8 +378,6 @@ plot(maModeOn ? slowMA : na, title = "Slow MA", color = slowMACol, linewidth = 1
 //  downstream consumer (markers, levels, alerts, dashboard) is unchanged and
 //  simply inherits the better timing.
 // =============================================================================
-float atrVal = ta.atr(atrLength)
-
 // --- guard 1: TREND. Only take the cross that agrees with the bigger move. ---
 float trendEma   = ta.ema(close, trendLen)
 float trendSlope = nz(trendEma - trendEma[1], 0.0)
@@ -805,7 +888,7 @@ if showDash and barstate.isconfirmed
         vMAE   := 0.0
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 24, border_width = 1)
+var table dash = table.new(position.top_right, 2, 26, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -867,6 +950,17 @@ if barstate.islast and showDash
     float randWR  = distOk ? 100.0 * slDist / (slDist + tpDist) : na
     float edgePP  = na(randWR) ? na : winRate - randWR
     color edgeCol = not na(edgePP) and edgePP > 0.0 ? dashWinCol : dashLosCol
+
+    // SIGNIFICANCE. With a few hundred trades a 2 pp gap is ordinary noise, so
+    // a raw edge number invites chasing ghosts. This is how many standard
+    // errors the edge sits from the coin flip:
+    //     SE = sqrt(p(1-p)/n) with p = the random win rate.
+    // Below 2 sigma the result is indistinguishable from luck no matter how
+    // green the row above looks. Screen on THIS, not on the pp figure.
+    float pRand   = na(randWR) ? na : randWR / 100.0
+    float seWR    = na(pRand) or fTotal <= 0 ? na : math.sqrt(pRand * (1.0 - pRand) / fTotal) * 100.0
+    float zEdge   = na(seWR) or seWR <= 0.0 ? na : edgePP / seWR
+    color zCol    = not na(zEdge) and zEdge >= 2.0 ? dashWinCol : dashLosCol
 
     // Win rate this payoff needs to break even, INCLUDING the cost.
     // p = (1 + cost) / (1 + tp), all in R.
@@ -931,8 +1025,15 @@ if barstate.islast and showDash
     // and no stop/target tuning can rescue it.
     table.cell(dash, 0, 23, "EDGE vs rnd", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 23, na(edgePP) ? "-" : (edgePP >= 0.0 ? "+" : "") + str.tostring(edgePP, "#.#") + " pp", text_color = edgeCol, bgcolor = dashBg)
+    // Green only at 2 sigma or better. Anything less is luck, however green
+    // the row above looks. This is the row to screen engines on.
+    table.cell(dash, 0, 24, "Edge sigma", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 24, na(zEdge) ? "-" : str.tostring(zEdge, "#.##") + (zEdge >= 2.0 ? " OK" : " noise"), text_color = zCol, bgcolor = dashBg)
+    // Which engine produced the numbers above, so screenshots are self-labelling.
+    table.cell(dash, 0, 25, "Engine", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 25, signalMode, text_color = dashTxt, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 23
+    for r = 0 to 25
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)
