@@ -225,6 +225,20 @@ The practical rule: **keep the stop wide enough that Cost/R stays under 0.05.** 
 Dropping to a 1m chart with a 150 pip stop hands a fifth of every R to the spread before
 the strategy does anything at all.
 
+## What live alerts can and cannot tell you
+
+Live forward-testing confirms the **plumbing** — that alerts fire, the webhook lands, TVMT
+opens the right direction at the right levels. That is worth doing once, and a handful of
+alerts is enough for it.
+
+It cannot tell you whether there is an **edge**. `Edge sigma` needs a few hundred trades to
+separate skill from luck, and with the guards on, a 15m chart with a 10-bar cooldown
+produces only a few signals a day. Reaching significance that way takes months, during
+which the account is paying spread to learn what the history tab already knows.
+
+Use the dashboard for the edge question and live alerts for the plumbing question. They
+answer different things.
+
 ## Recommended starting configuration
 
 Measured from the live XAUUSD 15m run: 2870 signals, 36.3% win rate, 63.7% SL hit,
@@ -419,6 +433,18 @@ It applies to the **One alert (alert function)** method only. TradingView requir
 switched at runtime and is always braced.
 
 ## Alert setup (TVMT webhook)
+
+> **An alert freezes the settings it was created with.** TradingView snapshots the
+> indicator's inputs at the moment the alert is created. Editing the inputs afterwards
+> changes the chart and the dashboard but **not** the running alert, which keeps firing the
+> old configuration silently and for ever.
+>
+> So after **every** settings change — lengths, SL/TP, any guard in group 1b — **delete the
+> old alert and create a new one.** Then open the alerts panel and confirm exactly one
+> BUY and one SELL alert are active. A stale alert left running alongside a new one sends
+> TVMT two conflicting signals, and with `Opposite-signal handling = Close and reverse`
+> that thrashes the account.
+
 1. Right-click the chart → **Add alert**
 2. Condition: **MFZ BYA IMACD2** → pick **MFZ BUY (TVMT)** or **MFZ SELL (TVMT)**
 3. Trigger: **Once Per Bar Close**
