@@ -17,6 +17,35 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## Costs decide everything on a tight stop
+
+The dashboard charges a **round-trip cost** against every trade and reports
+`Exp net R` after it. A simulation run on mid prices with no spread will show an edge
+that does not exist at the broker, and the tighter the stop, the more violent the effect:
+
+| Stop | 30 pip cost as a share of 1R | Break-even WR at 1:1 |
+|---|---|---|
+| 150 pips | **0.199 R** | 60.0 % |
+| 300 pips | 0.100 R | 55.0 % |
+| 500 pips | 0.060 R | 53.0 % |
+| 600 pips | 0.050 R | 52.5 % |
+
+Read your own spread straight off the chart — the BUY and SELL buttons at the top left
+are ask and bid. On XAUUSD that gap is normally 0.20–0.35, which is **20–35 pips** in this
+script's units, and it is charged once per trade.
+
+Two rows exist to keep this honest:
+
+- **Cost/R** — the round trip as a share of one R. **It turns red at 0.10.** Above that,
+  the stop is too tight for the spread and no realistic edge survives.
+- **Breakeven WR** — the win rate needed to break even, `(1 + cost) / (1 + tp)` in R, so
+  it already includes the cost. It turns green only when Win Rate actually clears it.
+
+The practical rule: **keep the stop wide enough that Cost/R stays under 0.05.** With a
+0.30 spread that means roughly 600 pips, which is a 15m-or-higher decision, not a 1m one.
+Dropping to a 1m chart with a 150 pip stop hands a fifth of every R to the spread before
+the strategy does anything at all.
+
 ## Recommended starting configuration
 
 Measured from the live XAUUSD 15m run: 2870 signals, 36.3% win rate, 63.7% SL hit,
@@ -41,9 +70,11 @@ Start here, then tune one input at a time against the Expectancy row:
 
 Then read three rows in this order:
 
-1. **Expectancy** — the only row that decides anything. Positive or it does not trade.
-2. **Breakeven WR** — the win rate your current SL/TP ratio needs. Compare with Win Rate.
-   If Win Rate sits below it, the setup loses no matter how good it feels.
+1. **Exp net R** — the only row that decides anything, already net of costs.
+   Positive or it does not trade.
+2. **Cost/R** then **Breakeven WR** — if Cost/R is red, fix the stop width before reading
+   anything else. Breakeven WR includes the cost; if Win Rate sits below it, the setup
+   loses no matter how good it feels.
 3. **MAE (wins)** — average heat a winning trade survived, in R. **If this is 0.7 R or
    more it turns red: your stop is inside normal noise.** Winners are only just escaping
    it, which means the loss column contains trades that a wider stop would have won.
