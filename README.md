@@ -17,6 +17,43 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## Measured result of the entry-timing fix
+
+XAUUSD 15m, SL 500 / TP1 700, same history before and after (`Bars md != 0` 13684 vs
+13686), so this is a like-for-like comparison:
+
+| | Before guards | After guards |
+|---|---|---|
+| Signals | 2870 | 631 (−78%) |
+| Win Rate | 36.3 % | **40.6 %** (+4.3 pp) |
+| SL Hit | 63.7 % | 59.4 % |
+| Gross expectancy | −0.129 R | **−0.023 R** (+0.106 R) |
+
+The guards recovered most of the deficit. They did not close it: charge the 0.06 R spread
+and net expectancy is still **−0.083 R**, against a cost-inclusive break-even win rate of
+44.2 %.
+
+**Widening the target does not help** — the hit rate falls faster than R rises:
+
+| Target | R | Est. win rate | Net expectancy |
+|---|---|---|---|
+| TP1 700p | 1.4 | 40.6 % | −0.086 R |
+| TP2 1000p | 2.0 | 31.4 % | −0.117 R |
+| TP3 1200p | 2.4 | 27.2 % | −0.136 R |
+
+That leaves the **stop** as the remaining lever, which is what `MAE p90 -> SL` is for.
+
+### Sizing the stop from MAE
+
+`MAE (wins)` is the average heat a winner survived. `MAE p90 -> SL` is the 90th
+percentile of that distribution, shown in R and as a pip distance. A stop set there would
+still have caught **9 out of every 10 winners** while making every loss proportionally
+smaller — which raises reward-to-risk directly, the one thing widening the target could not do.
+
+Tightening only pays while the winners survive. The trade-off is worth taking when
+`MAE p90` is comfortably below 1.0 R, and not worth taking when it sits near it. Type the
+pip figure into group 2 and into TVMT together, then re-read `Exp net R`.
+
 ## Costs decide everything on a tight stop
 
 The dashboard charges a **round-trip cost** against every trade and reports
