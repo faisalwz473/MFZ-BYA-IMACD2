@@ -105,6 +105,42 @@ hands **0.199 R** to the broker on every trade.
 Keep the stop above **1 ATR** and `Cost/R` under **0.05**, or the dashboard is measuring
 noise and the account is paying the spread to find that out.
 
+## Engine comparison table — the whole question in one look
+
+Bottom-right of the chart. It runs **all eight engines in parallel** over the same bars,
+under your current guards and levels, and reports each one's edge over a coin flip with
+its significance:
+
+```
+ENGINE         n     edge   sigma
+IMACD md/sb   674    +0.9    0.48
+IMACD sb/md   ...     ...     ...
+EMA cross     ...     ...     ...
+Zero line     ...     ...     ...
+Donchian      ...     ...     ...
+RSI reversal  ...     ...     ...
+Squeeze       ...     ...     ...
+Bar thrust    ...     ...     ...
+vs random    41.7%  2 sigma = real
+```
+
+**Read the sigma column. Nothing else.** Green at +2 or better means a real edge worth
+investigating in the main dashboard. Everything between −2 and +2 is noise, however
+inviting the edge column looks.
+
+If no engine clears 2 sigma, that is the answer: none of these ideas has a measurable edge
+on this market and timeframe. The next move is a different market, a different timeframe,
+or a different idea — **not** more tuning of these.
+
+> **Breakouts need the extension filter off.** A breakout is extended by definition, so
+> Donchian and Squeeze are penalised while it is on. Read the table once with
+> `Skip Signals That Are Already Extended` ticked and once with it unticked.
+
+The simulation is deliberately simplified to the live exit model — single TP, cost charged
+— because that is all a screen needs. It was verified against the main single-engine
+simulation: both produce identical trades, wins and R across eight independent signal
+streams.
+
 ## Using this as an edge screener
 
 The harness is now the valuable part. Timing guards, pullback entry, levels, alerts,

@@ -212,6 +212,7 @@ beOffR    = input.float(0.0, "Breakeven SL Offset (x SL distance)", minval = 0.0
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
+showCompare = input.bool(true, "Show Engine Comparison Table", group = G_DASH, tooltip = "Runs ALL EIGHT engines side by side over the same history, under your current guards and levels, and reports each one's edge over a coin flip with its significance.\nOne look replaces eight passes of switching Signal Mode and screenshotting. If no engine shows 2 sigma or better, none of them has a measurable edge here and the answer is to change market, timeframe or idea - not to keep tuning.\nNOTE: breakouts are extended by definition, so Donchian and Squeeze are unfairly penalised while the extension filter is on. Read the table once with it on and once with it off.", display = display.none)
 dashMode   = input.string("Compact (decision rows only)", "Dashboard Detail", options = ["Compact (decision rows only)", "Full (all diagnostics)"], group = G_DASH, tooltip = "Compact shows the eight rows that decide anything and fits on screen. Full adds every diagnostic underneath, which on a short chart window can run off the bottom.\nEither way the decision rows are at the TOP, so they are always visible.", display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
@@ -725,6 +726,152 @@ if alertMode == "One alert (alert function)"
         alert(f_json("buy"), alert.freq_once_per_bar_close)
     else if sellSignal
         alert(f_json("sell"), alert.freq_once_per_bar_close)
+
+// =============================================================================
+//  ENGINE COMPARISON - all eight engines, same history, same guards, same levels
+//  -------------------------------------------------------------------------
+//  Screening one engine at a time means eight passes of switching Signal Mode
+//  and reading the table. This runs every engine in parallel on the same bars
+//  and reports each one's edge over a coin flip with its significance, so the
+//  question "does ANY of these work here" gets answered in a single look.
+//
+//  Deliberately simplified to the live exit model - single TP, cost charged -
+//  because that is all a screen needs. Use the main dashboard to dig into
+//  whichever engine, if any, clears 2 sigma.
+// =============================================================================
+var cmpTrades  = array.new_int(8, 0)
+var cmpWins    = array.new_int(8, 0)
+var cmpSumR    = array.new_float(8, 0.0)
+var cmpDir     = array.new_int(8, 0)
+var cmpEntry   = array.new_float(8, na)
+var cmpSL      = array.new_float(8, na)
+var cmpTP      = array.new_float(8, na)
+var cmpR       = array.new_float(8, na)
+var cmpArmDir  = array.new_int(8, 0)
+var cmpArmPx   = array.new_float(8, na)
+var cmpArmBar  = array.new_int(8, 0)
+var cmpLastSig = array.new_int(8, -1000000)
+
+if showCompare and barstate.isconfirmed
+    upArr = array.from(macdUp, sigUp, maUp, zeroUp, dcUp, rsiUp, sqzUp, thrUp)
+    dnArr = array.from(macdDn, sigDn, maDn, zeroDn, dcDn, rsiDn, sqzDn, thrDn)
+
+    for i = 0 to 7
+        bool rUp = array.get(upArr, i)
+        bool rDn = array.get(dnArr, i)
+
+        // ---- 1) walk this engine's open trade ----
+        int tDir = array.get(cmpDir, i)
+        if tDir != 0
+            float tE = array.get(cmpEntry, i)
+            float tS = array.get(cmpSL, i)
+            float tT = array.get(cmpTP, i)
+            float tR = array.get(cmpR, i)
+            bool sHit = tDir == 1 ? low <= tS : high >= tS
+            bool pHit = tDir == 1 ? high >= tT : low <= tT
+            bool sFirst = sHit and pHit ? math.abs(open - tS) <= math.abs(open - tT) : sHit
+            float got = na
+            if sFirst
+                got := -1.0
+            else if pHit
+                got := (tT - tE) * tDir / tR
+            if not na(got)
+                float netGot = got - costPips * pipPrice / tR
+                array.set(cmpTrades, i, array.get(cmpTrades, i) + 1)
+                array.set(cmpSumR,  i, array.get(cmpSumR,  i) + netGot)
+                if got > 0.0
+                    array.set(cmpWins, i, array.get(cmpWins, i) + 1)
+                array.set(cmpDir, i, 0)
+
+        // ---- 2) guards. Shared with the main pipeline except the cooldown,
+        //         which has to be tracked per engine. ----
+        bool gT = rUp ? trendBuyOk : trendSellOk
+        bool gZ = rUp ? zoneBuyOk  : zoneSellOk
+        bool gC = coolBars <= 0 or (bar_index - array.get(cmpLastSig, i)) >= coolBars
+        bool cand = (rUp or rDn) and gT and gZ and gC and notExtended and inSession
+
+        if cand
+            array.set(cmpArmDir, i, rUp ? 1 : -1)
+            array.set(cmpArmPx,  i, rUp ? close - pbDist : close + pbDist)
+            array.set(cmpArmBar, i, bar_index)
+
+        // ---- 3) fill the parked order ----
+        int aDir = array.get(cmpArmDir, i)
+        if aDir != 0
+            float aPx  = array.get(cmpArmPx, i)
+            int   aBar = array.get(cmpArmBar, i)
+            bool same  = bar_index == aBar
+            bool hit   = false
+            if not usePullback and same
+                hit := true
+            else if not same
+                hit := aDir == 1 ? low <= aPx : high >= aPx
+
+            if hit
+                // close-and-reverse: mark any open trade to the current price
+                int oDir = array.get(cmpDir, i)
+                if oDir != 0
+                    float oE = array.get(cmpEntry, i)
+                    float oR = array.get(cmpR, i)
+                    float revGot = (close - oE) * oDir / oR - costPips * pipPrice / oR
+                    array.set(cmpTrades, i, array.get(cmpTrades, i) + 1)
+                    array.set(cmpSumR,  i, array.get(cmpSumR,  i) + revGot)
+                    if revGot > 0.0
+                        array.set(cmpWins, i, array.get(cmpWins, i) + 1)
+
+                float eP = close
+                float dS = f_dist(distMethod, slPips,  slAtr,  slPct,  eP)
+                float dT = f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, eP)
+                array.set(cmpDir,   i, aDir)
+                array.set(cmpEntry, i, eP)
+                array.set(cmpSL,    i, aDir == 1 ? eP - dS : eP + dS)
+                array.set(cmpTP,    i, aDir == 1 ? eP + dT : eP - dT)
+                array.set(cmpR,     i, math.max(dS, syminfo.mintick))
+                array.set(cmpLastSig, i, bar_index)
+
+            if hit or (bar_index - aBar) >= pbBars
+                array.set(cmpArmDir, i, 0)
+
+var table cmpTbl = table.new(position.bottom_right, 4, 10, border_width = 1)
+
+if barstate.islast and showCompare
+    engNames = array.from("IMACD md/sb", "IMACD sb/md", "EMA cross", "Zero line", "Donchian", "RSI reversal", "Squeeze", "Bar thrust")
+
+    table.cell(cmpTbl, 0, 0, "ENGINE", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(cmpTbl, 1, 0, "n", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(cmpTbl, 2, 0, "edge", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(cmpTbl, 3, 0, "sigma", text_color = dashTxt, bgcolor = dashBg)
+
+    float cSl = na(pEntry) ? na : math.abs(pEntry - pSL)
+    float cTp = na(pEntry) ? na : math.abs(pTP1 - pEntry)
+    bool  cOk = not na(cSl) and not na(cTp) and cSl > 0.0
+    float cRand = cOk ? 100.0 * cSl / (cSl + cTp) : na
+
+    for i = 0 to 7
+        int   n  = array.get(cmpTrades, i)
+        int   w  = array.get(cmpWins, i)
+        float fn = n
+        float fw = w
+        float wr = n > 0 ? fw / fn * 100.0 : na
+        float ed = na(wr) or na(cRand) ? na : wr - cRand
+        float pr = na(cRand) ? na : cRand / 100.0
+        float se = na(pr) or n <= 0 ? na : math.sqrt(pr * (1.0 - pr) / fn) * 100.0
+        float zz = na(se) or se <= 0.0 or na(ed) ? na : ed / se
+        color zc = not na(zz) and zz >= 2.0 ? dashWinCol : not na(zz) and zz <= -2.0 ? dashLosCol : dashTxt
+
+        table.cell(cmpTbl, 0, i + 1, array.get(engNames, i), text_color = dashTxt, bgcolor = dashBg)
+        table.cell(cmpTbl, 1, i + 1, str.tostring(n), text_color = dashTxt, bgcolor = dashBg)
+        table.cell(cmpTbl, 2, i + 1, na(ed) ? "-" : (ed >= 0.0 ? "+" : "") + str.tostring(ed, "#.#"), text_color = not na(ed) and ed > 0.0 ? dashWinCol : dashLosCol, bgcolor = dashBg)
+        table.cell(cmpTbl, 3, i + 1, na(zz) ? "-" : str.tostring(zz, "#.##"), text_color = zc, bgcolor = dashBg)
+
+    table.cell(cmpTbl, 0, 9, "vs random", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(cmpTbl, 1, 9, na(cRand) ? "-" : str.tostring(cRand, "#.#") + "%", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(cmpTbl, 2, 9, "2 sigma", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(cmpTbl, 3, 9, "= real", text_color = dashTxt, bgcolor = dashBg)
+
+    for rr = 0 to 9
+        for cc = 0 to 3
+            table.cell_set_text_size(cmpTbl, cc, rr, dashSizeV)
 
 // =============================================================================
 //  WIN RATE DASHBOARD
