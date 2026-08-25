@@ -17,6 +17,68 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## Entry timing — the late-entry fix
+
+The raw Impulse MACD cross is a **late** event by construction. `md` is built from
+`ta.rma(high/low, 10)`, and Wilder smoothing lags by roughly `2N-1 = 19` bars. That
+already-late value is then crossed against its own 3-bar average. By the time the cross
+confirms, the leg it is reporting is usually finished — so a market order at that bar's
+close buys the top or sells the bottom, and price reverses immediately after execution.
+
+The cross is still the **direction** source. It no longer decides **when** to enter:
+
+```
+raw cross -> trend -> extension -> cooldown -> ARM -> pullback -> FILL
+```
+
+`buySignal` / `sellSignal` now fire on the **fill** bar. Markers, levels, alerts and the
+dashboard all inherit the better timing without any change of their own.
+
+Group **1b - Entry Timing (Late Entry Fix)** in Settings:
+
+| Input | Default | What it does |
+|---|---|---|
+| Trade With The Trend Only | on | Buy only above a rising trend EMA, Sell only below a falling one. Counter-trend crosses reverse fastest. |
+| Trend EMA Length | 50 | Bigger = stricter. |
+| Skip Signals That Are Already Extended | on | **The main fix.** Measures how far the close already sits from the Impulse mid line, in ATR. |
+| Max Distance From Mid Line (x ATR) | 1.5 | Lower = stricter = fewer, earlier entries. |
+| Wait For Pullback Before Entry | on | Arms the signal and waits for price to retrace instead of firing at the cross bar close. |
+| Pullback Depth (x ATR) | 0.5 | How far price must come back before the entry is accepted. |
+| Pullback Window (bars) | 6 | How long the armed signal waits. No pullback in the window = **no trade at all**. |
+| Entry Price Sent To TVMT | Fill bar close | Use `Fill bar close` for market orders. `Pullback level` is only correct if TVMT places a pending **limit** order. |
+| Cooldown After A Signal (bars) | 10 | Minimum bars between accepted signals. Stops the clusters of three SELLs in four bars. |
+| Floor The Stop At A Minimum ATR Distance | **off** | Widens the stop when the fixed pip distance is tighter than normal noise. |
+| Minimum Stop Distance (x ATR) | 1.5 | Only widens, never tightens. Take profits stay put, so this lowers R:R — measure before keeping it. |
+
+Turning all four guards off reproduces the original behaviour exactly.
+
+### The arm / fill state machine
+
+A cross that survives the guards parks a target price and waits, the way a resting limit
+order would:
+
+- The **arm bar itself can never fill** — its high/low already happened before the order
+  existed, so a retroactive fill would be a lie.
+- A new cross in either direction **cancels** whatever was parked. Only one order is ever
+  pending.
+- If the window runs out unfilled the signal **expires** and nothing is sent to TVMT.
+  Missing the runaway moves is the deliberate price of not entering at their extreme.
+
+### How to tune it
+
+The dashboard is the instrument. Read it in this order:
+
+1. **Raw Crosses** — what the engine found before any guard.
+2. **Blk T/E/C** — crosses discarded by Trend / Extension / Cooldown, attributed in that
+   order so each cross is counted once.
+3. **Armed** — survivors that parked an order.
+4. **Filled** — armed orders that got their pullback. These are the real signals.
+5. **Expired** — armed orders that never got one. No trade taken.
+
+If `Filled` is very small, loosen: raise **Max Distance**, raise **Pullback Window**, or
+lower **Pullback Depth**. If the win rate is still poor, tighten the same three instead.
+Change one input at a time and re-read the table.
+
 ## Key behaviour
 - **No repainting** — signals are gated behind `barstate.isconfirmed`, so a printed marker never disappears.
 - **Distance Method** dropdown: `Pip` / `ATR` / `Percentage`. All three engines are built in and apply to all four levels.
@@ -28,6 +90,17 @@ Three other modes are selectable in Settings:
 - Lines extend right and labels re-anchor to the live edge every bar, so nothing scrolls off screen.
 - Every marker shape, marker colour and line colour is an input.
 - Every input uses `display = display.none`, so the chart status line shows only the indicator name.
+
+## A note on the outer braces
+
+The TVMT portal generates its own alert template **without** the outer `{ }`, noting that
+this stops TradingView flagging the message as JSON. The script sends them, and that is
+working today, so `Wrap Alert JSON In Outer Braces` defaults to **on**. Untick it only if
+TVMT starts rejecting payloads.
+
+It applies to the **One alert (alert function)** method only. TradingView requires
+`alertcondition()` messages to be compile-time constants, so the two-alert path cannot be
+switched at runtime and is always braced.
 
 ## Alert setup (TVMT webhook)
 1. Right-click the chart → **Add alert**

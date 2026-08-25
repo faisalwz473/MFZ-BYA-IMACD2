@@ -8,17 +8,27 @@
 //  alert for the TVMT webhook bridge.
 //
 //  HOW IT WORKS (beginner summary)
-//   1. The fast signal line (sb, length 3) crossing the slower Impulse MACD
-//      line (md, length 10) is the entry trigger:
-//         sb crosses UP through md   -> BUY
-//         sb crosses DOWN through md -> SELL
-//      Two alternative modes (MACD crosses Signal, Zero Line Cross) are kept
-//      as options in Settings.
-//   2. A signal is only accepted when the bar has CLOSED (barstate.isconfirmed),
+//   1. The Impulse MACD line (md, length 10) crossing its signal line
+//      (sb, length 3) gives the DIRECTION:
+//         md crosses UP through sb   -> long bias
+//         md crosses DOWN through sb -> short bias
+//      Three alternative modes are kept as options in Settings.
+//   2. The cross does NOT decide the entry moment. md is built from
+//      ta.rma(high/low, 10), which lags by roughly 19 bars, so the cross
+//      confirms after the leg it reports is already finished. Entering at that
+//      bar's close means buying the top. Group "1b - Entry Timing" fixes this:
+//
+//         raw cross -> trend -> extension -> cooldown -> ARM -> pullback -> FILL
+//
+//      A cross must agree with the trend EMA, must not already be extended
+//      beyond N x ATR from the mid line, and must respect a cooldown. It then
+//      parks a price and waits for price to retrace to it. Only that FILL is a
+//      signal. Turn the four guards off to get the original behaviour back.
+//   3. A signal is only accepted when the bar has CLOSED (barstate.isconfirmed),
 //      so a printed arrow can never disappear again -> no repainting.
-//   3. On that closed bar we capture Entry / SL / TP1 / TP2 / TP3 prices,
-//      draw them, and feed them to five hidden plots that the alert reads.
-//   4. The alert message is pure JSON built from {{plot("title")}} placeholders,
+//   4. On the fill bar we capture Entry / SL / TP1 / TP2 / TP3 prices, draw
+//      them, and feed them to five hidden plots that the alert reads.
+//   5. The alert message is pure JSON built from {{plot("title")}} placeholders,
 //      so TVMT always receives raw numbers in the exact expected field names.
 //
 //  ALERT SETUP (do this once in TradingView)
@@ -38,6 +48,7 @@ indicator(title = "BYA IMACD1", shorttitle = "BYA IMACD1", overlay = true, max_l
 //  still appear normally in Settings -> Inputs.
 // =============================================================================
 G_SIG   = "1 - Signal Engine (Impulse MACD)"
+G_TIME  = "1b - Entry Timing (Late Entry Fix)"
 G_DIST  = "2 - Distance Method (SL / TP)"
 G_PIP   = "2a - Pip Settings"
 G_ATR   = "2b - ATR Settings"
@@ -60,6 +71,35 @@ fastMACol    = input.color(color.aqua, "Fast MA Colour", group = G_SIG, display 
 slowMACol    = input.color(color.orange, "Slow MA Colour", group = G_SIG, display = display.none)
 useZone      = input.bool(false, "Require Impulse Zone Confirmation", group = G_SIG, tooltip = "Buy only while price is above the mid band, Sell only while below it. Filters out weak crosses.", display = display.none)
 flipOnly     = input.bool(false, "One Signal Per Direction (wait for opposite)", group = G_SIG, tooltip = "Blocks a second Buy before a Sell appears. Keeps one live setup at a time.", display = display.none)
+
+// -----------------------------------------------------------------------------
+//  1b. ENTRY TIMING INPUTS  <-- the fix for "the signal fires at the end of the move"
+//
+//  The raw Impulse MACD cross is a LATE event by construction. md is built from
+//  ta.rma(high/low, 10) bands, and Wilder smoothing lags by roughly 2N-1 = 19
+//  bars. That already-late value is then crossed against its own 3-bar average.
+//  By the time the cross confirms, the leg it is reporting is usually finished,
+//  so a market order at that bar's close buys the top or sells the bottom.
+//
+//  The cross is still the DIRECTION source, but it no longer picks the entry
+//  moment. Four guards stand between a cross and an order:
+//
+//     raw cross -> trend -> extension -> cooldown -> ARM -> pullback -> FILL
+//
+//  Nothing is drawn and nothing is sent to TVMT until the FILL bar.
+//  Switch all four off and the script behaves exactly as it did before.
+// -----------------------------------------------------------------------------
+useTrend    = input.bool(true, "Trade With The Trend Only", group = G_TIME, tooltip = "Buy only while price is above a rising trend EMA, Sell only while below a falling one. Counter-trend crosses are the ones that reverse fastest.", display = display.none)
+trendLen    = input.int(50, "Trend EMA Length", minval = 1, group = G_TIME, tooltip = "Length of the trend EMA. Bigger = stricter. 50 on a 15m chart is roughly half a session.", display = display.none)
+useExtFilt  = input.bool(true, "Skip Signals That Are Already Extended", group = G_TIME, tooltip = "THE MAIN LATE-ENTRY FIX. Measures how far the close already sits from the Impulse mid line, in ATR. If the leg has already travelled further than the limit below, the cross is ignored instead of chased.", display = display.none)
+maxExtAtr   = input.float(1.5, "Max Distance From Mid Line (x ATR)", minval = 0.1, step = 0.1, group = G_TIME, tooltip = "Lower = stricter = fewer but earlier entries. Start at 1.5, then walk it down to 1.2 / 1.0 while watching Win Rate and Filled on the dashboard.", display = display.none)
+usePullback = input.bool(true, "Wait For Pullback Before Entry", group = G_TIME, tooltip = "Instead of firing at the close of the cross bar, the signal is ARMED and only fires once price retraces by the depth below. If price never comes back inside the window, no trade is taken at all.", display = display.none)
+pbAtr       = input.float(0.5, "Pullback Depth (x ATR)", minval = 0.0, step = 0.1, group = G_TIME, tooltip = "How far back price must come before the entry is accepted. 0 = fill on the next bar that trades back to the cross bar close.", display = display.none)
+pbBars      = input.int(6, "Pullback Window (bars)", minval = 1, group = G_TIME, tooltip = "How long the armed signal waits for its pullback. Expires afterwards and nothing is sent. Raise it if Expired is much larger than Filled.", display = display.none)
+entryRef    = input.string("Fill bar close (market order)", "Entry Price Sent To TVMT", options = ["Fill bar close (market order)", "Pullback level (pending limit order)"], group = G_TIME, tooltip = "Fill bar close: the honest price for a MARKET order sent at bar close. Use this unless your TVMT bridge places pending orders.\nPullback level: sends the exact retrace price, which is only correct if TVMT places a pending LIMIT order.", display = display.none)
+coolBars    = input.int(10, "Cooldown After A Signal (bars)", minval = 0, group = G_TIME, tooltip = "Minimum bars between two accepted signals. This is what stops the machine-gun clusters of three SELLs in four bars.", display = display.none)
+useMinSl    = input.bool(false, "Floor The Stop At A Minimum ATR Distance", group = G_TIME, tooltip = "Widens the stop whenever your fixed pip distance is tighter than normal noise for the current volatility. On XAUUSD 15m a 500 pip (5.00) stop is only about 1 ATR, which ordinary chop takes out. Turn on and compare.", display = display.none)
+minSlAtr    = input.float(1.5, "Minimum Stop Distance (x ATR)", minval = 0.1, step = 0.1, group = G_TIME, tooltip = "Only applies when the floor above is enabled, and it can only widen the stop, never tighten it. Take profits are left where you set them, so this lowers R:R - check the dashboard before keeping it.", display = display.none)
 
 // -----------------------------------------------------------------------------
 //  2. DISTANCE METHOD INPUTS  (Pip / ATR / Percentage - trader picks one)
@@ -122,6 +162,7 @@ labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small"
 // -----------------------------------------------------------------------------
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
+jsonBraces = input.bool(true, "Wrap Alert JSON In Outer Braces", group = G_ALERT, tooltip = "The TVMT portal shows its own template WITHOUT the outer { } and notes that this stops TradingView flagging the message as JSON. Your current setup sends them and is executing fine, so this defaults to ON - untick it only if TVMT starts rejecting payloads.\nApplies to the One alert (alert function) method only: TradingView requires alertcondition() messages to be compile-time constants, so the two-alert path is always braced.", display = display.none)
 alertMode  = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALERT, tooltip = "Two alerts: create one alert per condition. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker. Immune to the double-fire problem.", display = display.none)
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
@@ -220,45 +261,145 @@ bool maModeOn = signalMode == "Fast MA crosses Slow MA (price)" and showMAs
 plot(maModeOn ? fastMA : na, title = "Fast MA", color = fastMACol, linewidth = 1, display = display.pane)
 plot(maModeOn ? slowMA : na, title = "Slow MA", color = slowMACol, linewidth = 1, display = display.pane)
 
-// Optional zone filter: only trade in the direction of the impulse band.
+// =============================================================================
+//  ENTRY TIMING PIPELINE
+//  -------------------------------------------------------------------------
+//  Everything below exists to separate WHICH WAY to trade from WHEN to enter.
+//  The cross above answers the first question. It used to answer the second one
+//  too, and that is what produced entries at the exact end of a leg.
+//
+//     raw cross -> trend -> extension -> cooldown -> ARM -> pullback -> FILL
+//
+//  buySignal / sellSignal now fire on the FILL bar, not on the cross bar. Every
+//  downstream consumer (markers, levels, alerts, dashboard) is unchanged and
+//  simply inherits the better timing.
+// =============================================================================
+float atrVal = ta.atr(atrLength)
+
+// --- guard 1: TREND. Only take the cross that agrees with the bigger move. ---
+float trendEma   = ta.ema(close, trendLen)
+float trendSlope = nz(trendEma - trendEma[1], 0.0)
+bool trendBuyOk  = not useTrend or (close > trendEma and trendSlope >= 0.0)
+bool trendSellOk = not useTrend or (close < trendEma and trendSlope <= 0.0)
+
+// --- guard 2: EXTENSION. How far has this leg ALREADY run, measured in ATR? --
+//  This is the direct answer to "the signal comes at the end of the move".
+//  A cross that only confirms once price is 3 ATR from the mid line is
+//  reporting a move that is over. Refuse it rather than chase it.
+float extAtr     = atrVal > 0.0 ? math.abs(close - mid) / atrVal : 0.0
+bool notExtended = not useExtFilt or extAtr <= maxExtAtr
+
+// --- guard 3: the original impulse-zone filter (behaviour unchanged) ---
 bool zoneBuyOk  = not useZone or srcInput > mid
 bool zoneSellOk = not useZone or srcInput < mid
 
-// NO REPAINT GATE: the bar must be finished before a signal counts.
-bool buyRaw  = rawBuy  and zoneBuyOk  and barstate.isconfirmed
-bool sellRaw = rawSell and zoneSellOk and barstate.isconfirmed
+// --- guard 4: COOLDOWN. Stops the script re-firing on every micro wiggle. ---
+var int lastSigBar = -1000000
+bool coolOk = coolBars <= 0 or (bar_index - lastSigBar) >= coolBars
+
+// NO REPAINT GATE: the bar must be finished before a cross counts.
+// A candidate is a cross that survived every guard. It still is not a trade.
+bool candBuy  = rawBuy  and zoneBuyOk  and trendBuyOk  and notExtended and coolOk and barstate.isconfirmed
+bool candSell = rawSell and zoneSellOk and trendSellOk and notExtended and coolOk and barstate.isconfirmed and not candBuy
+
+// -----------------------------------------------------------------------------
+//  ARM / FILL STATE MACHINE
+//  A surviving cross parks a target price and waits for price to come back to
+//  it, the way a resting limit order would. A new cross in either direction
+//  cancels whatever was parked, so only one order is ever pending.
+// -----------------------------------------------------------------------------
+var int   armDir   = 0
+var float armPrice = na
+var int   armBar   = 0
+var int   armedCount   = 0
+var int   expiredCount = 0
+
+float pbDist = usePullback ? pbAtr * nz(atrVal, 0.0) : 0.0
+
+if candBuy
+    armDir   := 1
+    armPrice := close - pbDist
+    armBar   := bar_index
+    armedCount += 1
+else if candSell
+    armDir   := -1
+    armPrice := close + pbDist
+    armBar   := bar_index
+    armedCount += 1
+
+bool fillBuy  = false
+bool fillSell = false
+
+if barstate.isconfirmed and armDir != 0
+    bool sameBar = bar_index == armBar
+    if not usePullback and sameBar
+        // Pullback disabled -> fire on the cross bar, exactly like the old script.
+        fillBuy  := armDir == 1
+        fillSell := armDir == -1
+    else if not sameBar
+        // Limit-style fill: a buy needs price to trade back DOWN to the level,
+        // a sell needs it to trade back UP. The arm bar itself cannot fill,
+        // because its low/high already happened before the order existed.
+        if armDir == 1 and low <= armPrice
+            fillBuy := true
+        else if armDir == -1 and high >= armPrice
+            fillSell := true
+
+// The parked order expires unfilled once its window runs out. No trade is taken.
+bool armExpired = armDir != 0 and not fillBuy and not fillSell and barstate.isconfirmed and (bar_index - armBar) >= pbBars
+if armExpired
+    expiredCount += 1
 
 // Optional "one signal per direction" filter (wait for the opposite side).
 var int lastDir = 0
-bool buySignal  = buyRaw  and (not flipOnly or lastDir != 1)
-bool sellSignal = sellRaw and not buyRaw and (not flipOnly or lastDir != -1)   // never both on one bar
+bool buySignal  = fillBuy  and (not flipOnly or lastDir != 1)
+bool sellSignal = fillSell and (not flipOnly or lastDir != -1)   // never both on one bar
+
 if buySignal
-    lastDir := 1
+    lastDir    := 1
+    lastSigBar := bar_index
 else if sellSignal
-    lastDir := -1
+    lastDir    := -1
+    lastSigBar := bar_index
+
+// Clear the parked order once it filled, was blocked by flipOnly, or expired.
+if fillBuy or fillSell or armExpired
+    armDir := 0
 
 // -----------------------------------------------------------------------------
-//  DIAGNOSTIC COUNTERS
-//  rawCount   = crosses the signal engine found, BEFORE any filter.
-//  firedCount = signals that survived the zone filter and the flip filter.
-//  If rawCount is 0 the cross itself never happens (md is flat). If rawCount is
-//  high but firedCount is 0, a filter is eating every signal.
+//  DIAGNOSTIC COUNTERS - this is how you tune the four guards above.
+//    Raw Crosses = crosses the engine found, before anything is applied.
+//    Blk T/E/C   = crosses thrown away by Trend / Extension / Cooldown.
+//    Armed       = crosses that survived and parked an order.
+//    Filled      = parked orders that got their pullback -> the real signals.
+//    Expired     = parked orders that never got a pullback -> no trade taken.
+//  Filled far too small? Loosen: raise Max Distance, raise Pullback Window, or
+//  lower Pullback Depth. Win rate still poor? Tighten the same three instead.
+//  Blk counts are attributed in guard order, so each cross is counted once.
 // -----------------------------------------------------------------------------
 var int rawCount   = 0
 var int firedCount = 0
 var int mdLiveBars = 0
+var int blkTrend   = 0
+var int blkExt     = 0
+var int blkCool    = 0
 
 if barstate.isconfirmed
     if rawBuy or rawSell
         rawCount += 1
+        bool tOk = rawBuy ? trendBuyOk : trendSellOk
+        if not tOk
+            blkTrend += 1
+        else if not notExtended
+            blkExt += 1
+        else if not coolOk
+            blkCool += 1
     if md != 0.0
         mdLiveBars += 1
 
 // =============================================================================
 //  DISTANCE ENGINES - Pip / ATR / Percentage
 // =============================================================================
-float atrVal = ta.atr(atrLength)
-
 // Pip size in PRICE units. Auto = 10 points = 10 * mintick.
 float pipPrice = pipMode == "Manual" ? manualPip : 10.0 * syminfo.mintick
 
@@ -283,11 +424,18 @@ if newSignal
     firedCount += 1
 
 if newSignal
-    float entryP = close                       // entry = close of the confirmed bar
+    // Entry reference. A market order sent at bar close fills at that close, so
+    // that is the honest number to report. Only switch to the parked pullback
+    // level if your TVMT bridge actually places a pending LIMIT order.
+    float entryP = (usePullback and entryRef == "Pullback level (pending limit order)") ? armPrice : close
     float dSL  = f_dist(distMethod, slPips,  slAtr,  slPct,  entryP)
     float dT1  = f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, entryP)
     float dT2  = f_dist(distMethod, tp2Pips, tp2Atr, tp2Pct, entryP)
     float dT3  = f_dist(distMethod, tp3Pips, tp3Atr, tp3Pct, entryP)
+
+    // Optional volatility floor on the stop. It can only ever widen the stop.
+    if useMinSl
+        dSL := math.max(dSL, minSlAtr * nz(atrVal, 0.0))
     pDir   := buySignal ? 1 : -1
     pEntry := entryP
     pSL    := buySignal ? entryP - dSL : entryP + dSL
@@ -438,7 +586,7 @@ alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": 
 //  Set the alert up as: Condition "BYA IMACD1" -> "Any alert() function call".
 // -----------------------------------------------------------------------------
 f_json(string action) =>
-    string j = '{\n'
+    string j = jsonBraces ? '{\n' : ''
     j += '  "symbol": "' + syminfo.ticker + '",\n'
     j += '  "action": "' + action + '",\n'
     j += '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
@@ -448,7 +596,7 @@ f_json(string action) =>
     j += '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
     j += '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
     j += '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
-    j += '}'
+    j += jsonBraces ? '}' : ''
     j
 
 if alertMode == "One alert (alert function)"
@@ -534,7 +682,7 @@ if showDash and barstate.isconfirmed
         vGotT3 := false
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 12, border_width = 1)
+var table dash = table.new(position.top_right, 2, 15, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -567,12 +715,18 @@ if barstate.islast and showDash
     table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg)
     table.cell(dash, 0, 9, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 9, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 10, "After Filters", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 10, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 11, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 11, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 10, "Blk T/E/C", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 10, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 11, "Armed", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 11, str.tostring(armedCount), text_color = armedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 12, "Filled", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 12, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 13, "Expired", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 13, str.tostring(expiredCount), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 14, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 14, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 11
+    for r = 0 to 14
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)
