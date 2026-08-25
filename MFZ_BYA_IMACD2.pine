@@ -98,6 +98,9 @@ usePullback = input.bool(true, "Wait For Pullback Before Entry", group = G_TIME,
 pbAtr       = input.float(0.5, "Pullback Depth (x ATR)", minval = 0.0, step = 0.1, group = G_TIME, tooltip = "How far back price must come before the entry is accepted. 0 = fill on the next bar that trades back to the cross bar close.", display = display.none)
 pbBars      = input.int(6, "Pullback Window (bars)", minval = 1, group = G_TIME, tooltip = "How long the armed signal waits for its pullback. Expires afterwards and nothing is sent. Raise it if Expired is much larger than Filled.", display = display.none)
 entryRef    = input.string("Fill bar close (market order)", "Entry Price Sent To TVMT", options = ["Fill bar close (market order)", "Pullback level (pending limit order)"], group = G_TIME, tooltip = "Fill bar close: the honest price for a MARKET order sent at bar close. Use this unless your TVMT bridge places pending orders.\nPullback level: sends the exact retrace price, which is only correct if TVMT places a pending LIMIT order.", display = display.none)
+useSession  = input.bool(false, "Trade Only Inside A Session", group = G_TIME, tooltip = "Gold is thin and mean-reverting outside London/New York, which is exactly where a momentum crossover bleeds. Off by default - turn it on and read the expectancy before keeping it.", display = display.none)
+sessSpec    = input.session("0700-2000", "Session (exchange time unless a timezone is set below)", group = G_TIME, tooltip = "Default 0700-2000 covers the London open through the New York afternoon.", display = display.none)
+sessTz      = input.string("GMT+0", "Session Timezone", group = G_TIME, tooltip = "Timezone the session above is expressed in, e.g. GMT+0, GMT-5, GMT+8. Check your chart's clock before trusting this filter.", display = display.none)
 coolBars    = input.int(10, "Cooldown After A Signal (bars)", minval = 0, group = G_TIME, tooltip = "Minimum bars between two accepted signals. This is what stops the machine-gun clusters of three SELLs in four bars.", display = display.none)
 useMinSl    = input.bool(false, "Floor The Stop At A Minimum ATR Distance", group = G_TIME, tooltip = "Widens the stop whenever your fixed pip distance is tighter than normal noise for the current volatility. On XAUUSD 15m a 500 pip (5.00) stop is only about 1 ATR, which ordinary chop takes out. Turn on and compare.", display = display.none)
 minSlAtr    = input.float(1.5, "Minimum Stop Distance (x ATR)", minval = 0.1, step = 0.1, group = G_TIME, tooltip = "Only applies when the floor above is enabled, and it can only widen the stop, never tighten it. Take profits are left where you set them, so this lowers R:R - check the dashboard before keeping it.", display = display.none)
@@ -161,7 +164,7 @@ showPips   = input.bool(true, "Show Distance In Pips On Labels", group = G_LINE,
 labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small", "Normal"], group = G_LINE, display = display.none)
 
 // -----------------------------------------------------------------------------
-//  5. DASHBOARD INPUTS
+//  6. ALERT INPUTS
 // -----------------------------------------------------------------------------
 levelSrc   = input.string("Indicator sends SL / TP to TVMT", "Who Sets SL / TP", options = ["Indicator sends SL / TP to TVMT", "TVMT Trading Setup (indicator levels are display only)"], group = G_ALERT, tooltip = "CHECK THIS AGAINST YOUR TVMT TRADING SETUP PAGE.\nIf TVMT applies its own SL/TP, the levels this script draws are NOT the ones being traded, and the win rate dashboard is measuring a different strategy from your account.\nEither way the fix is the same: type the SAME distances into group 2 that TVMT uses, so chart, dashboard and account all agree.\nTVMT mode drops entry/sl/tp/tp2/tp3 from the payload so there is no ambiguity about which side wins. Applies to the One alert (alert function) method only - alertcondition() messages must be compile-time constants, so the two-alert path always sends levels.", display = display.none)
 jsonBraces = input.bool(true, "Wrap Alert JSON In Outer Braces", group = G_ALERT, tooltip = "The TVMT portal shows its own template WITHOUT the outer { } and notes that this stops TradingView flagging the message as JSON. Your current setup sends them and is executing fine, so this defaults to ON - untick it only if TVMT starts rejecting payloads.\nApplies to the One alert (alert function) method only: TradingView requires alertcondition() messages to be compile-time constants, so the two-alert path is always braced.", display = display.none)
@@ -176,6 +179,9 @@ simBE     = input.bool(false, "Simulate Auto Breakeven", group = G_EXEC, tooltip
 beTrigR   = input.float(0.4, "Breakeven Trigger (x SL distance)", minval = 0.05, step = 0.05, group = G_EXEC, tooltip = "Expressed as a fraction of your stop distance so it is unit-free. TVMT states this in ITS pips, which may not equal this script's pip - 0.4 here means 40% of the way to a full stop loss in profit.", display = display.none)
 beOffR    = input.float(0.0, "Breakeven SL Offset (x SL distance)", minval = 0.0, step = 0.05, group = G_EXEC, tooltip = "Where the stop lands once breakeven arms. 0 = exactly at entry.", display = display.none)
 
+// -----------------------------------------------------------------------------
+//  5. DASHBOARD INPUTS
+// -----------------------------------------------------------------------------
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
@@ -309,10 +315,13 @@ bool zoneSellOk = not useZone or srcInput < mid
 var int lastSigBar = -1000000
 bool coolOk = coolBars <= 0 or (bar_index - lastSigBar) >= coolBars
 
+// --- guard 5: SESSION. Optional. Keeps the engine out of the thin hours. ---
+bool inSession = not useSession or not na(time(timeframe.period, sessSpec, sessTz))
+
 // NO REPAINT GATE: the bar must be finished before a cross counts.
 // A candidate is a cross that survived every guard. It still is not a trade.
-bool candBuy  = rawBuy  and zoneBuyOk  and trendBuyOk  and notExtended and coolOk and barstate.isconfirmed
-bool candSell = rawSell and zoneSellOk and trendSellOk and notExtended and coolOk and barstate.isconfirmed and not candBuy
+bool candBuy  = rawBuy  and zoneBuyOk  and trendBuyOk  and notExtended and coolOk and inSession and barstate.isconfirmed
+bool candSell = rawSell and zoneSellOk and trendSellOk and notExtended and coolOk and inSession and barstate.isconfirmed and not candBuy
 
 // -----------------------------------------------------------------------------
 //  ARM / FILL STATE MACHINE
@@ -381,7 +390,10 @@ if fillBuy or fillSell or armExpired
 // -----------------------------------------------------------------------------
 //  DIAGNOSTIC COUNTERS - this is how you tune the four guards above.
 //    Raw Crosses = crosses the engine found, before anything is applied.
-//    Blk T/E/C   = crosses thrown away by Trend / Extension / Cooldown.
+//    Blk T/E/C/S/Z = crosses thrown away by Trend / Extension / Cooldown /
+//                  Session / impulse Zone. Attributed in guard order so each
+//                  cross lands in exactly one bucket, which means
+//                  Raw Crosses = T + E + C + S + Z + Armed, exactly.
 //    Armed       = crosses that survived and parked an order.
 //    Filled      = parked orders that got their pullback -> the real signals.
 //    Expired     = parked orders that never got a pullback -> no trade taken.
@@ -395,17 +407,24 @@ var int mdLiveBars = 0
 var int blkTrend   = 0
 var int blkExt     = 0
 var int blkCool    = 0
+var int blkSess    = 0
+var int blkZone    = 0
 
 if barstate.isconfirmed
     if rawBuy or rawSell
         rawCount += 1
         bool tOk = rawBuy ? trendBuyOk : trendSellOk
+        bool zOk = rawBuy ? zoneBuyOk  : zoneSellOk
         if not tOk
             blkTrend += 1
         else if not notExtended
             blkExt += 1
         else if not coolOk
             blkCool += 1
+        else if not inSession
+            blkSess += 1
+        else if not zOk
+            blkZone += 1
     if md != 0.0
         mdLiveBars += 1
 
@@ -642,6 +661,7 @@ var bool  vGotT2 = false
 var bool  vGotT3 = false
 var bool  vArmed = false    // stop has been moved to breakeven
 var float vBank  = 0.0      // R already realised from partial exits
+var float vMAE   = 0.0      // worst adverse excursion so far, in R
 
 var int   totalTrades = 0
 var int   winCount    = 0
@@ -652,6 +672,13 @@ var int   t2Count     = 0
 var int   t3Count     = 0
 var float sumR        = 0.0 // total R across every closed trade
 
+// MAE = Maximum Adverse Excursion: how far a trade went AGAINST you before it
+// resolved, in R. The average MAE of the WINNERS is the sharpest test of stop
+// width there is. If winners routinely survive 0.7R+ of heat, the stop is
+// sitting inside normal noise and a wider one converts losers into winners.
+var float maeWinSum = 0.0
+var int   maeWinN   = 0
+
 bool ladderOn = exitModel == "TP ladder 33/33/34 (TVMT ladder ON)"
 
 // NOTE: a Pine user-defined function may read globals but may NOT assign to
@@ -661,6 +688,10 @@ bool ladderOn = exitModel == "TP ladder 33/33/34 (TVMT ladder ON)"
 if showDash and barstate.isconfirmed
     // ---- 1) walk the open virtual trade forward with this bar's range ----
     if vDir != 0
+        // Track heat first, so the bar that resolves the trade still counts.
+        float advR = (vDir == 1 ? vEntry - low : high - vEntry) / vR
+        vMAE := math.max(vMAE, advR)
+
         // R multiples of each target, so every trade is scored on one scale.
         float r1 = (vT1 - vEntry) * vDir / vR
         float r2 = (vT2 - vEntry) * vDir / vR
@@ -721,7 +752,9 @@ if showDash and barstate.isconfirmed
             totalTrades += 1
             sumR        += bookR
             if bookR > 0.0
-                winCount += 1
+                winCount  += 1
+                maeWinSum += vMAE
+                maeWinN   += 1
             else
                 lossCount += 1
             vDir := 0
@@ -741,7 +774,9 @@ if showDash and barstate.isconfirmed
             totalTrades += 1
             sumR        += revR
             if revR > 0.0
-                winCount += 1
+                winCount  += 1
+                maeWinSum += vMAE
+                maeWinN   += 1
             else
                 lossCount += 1
         vDir   := pDir
@@ -756,9 +791,10 @@ if showDash and barstate.isconfirmed
         vGotT3 := false
         vArmed := false
         vBank  := 0.0
+        vMAE   := 0.0
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 18, border_width = 1)
+var table dash = table.new(position.top_right, 2, 20, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -775,6 +811,13 @@ if barstate.islast and showDash
     // at 3R and fatal at 1.4R, so win rate alone cannot tell you if this works.
     float expR    = fTotal > 0 ? sumR / fTotal : 0.0
     color expCol  = expR > 0.0 ? dashWinCol : dashLosCol
+
+    // Average heat survived by the winners. Approaching 1.0 R means the stop is
+    // inside normal noise: the winners are only just escaping it, so the losers
+    // almost certainly include trades that would have won with a wider stop.
+    float fMaeN   = maeWinN
+    float maeWin  = maeWinN > 0 ? maeWinSum / fMaeN : 0.0
+    color maeCol  = maeWin >= 0.7 ? dashLosCol : dashTxt
 
     table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 0, (ladderOn ? "LADDER" : "1-TP") + (sendLevels ? " IND" : " TVMT"), text_color = dashTxt, bgcolor = dashBg)
@@ -802,8 +845,8 @@ if barstate.islast and showDash
     table.cell(dash, 1, 10, ladderOn ? f_pct(t3Count, totalTrades) : "off", text_color = tp3Col, bgcolor = dashBg)
     table.cell(dash, 0, 11, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 11, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 12, "Blk T/E/C", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 12, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool), text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 12, "Blk T/E/C/S/Z", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 12, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool) + "/" + str.tostring(blkSess) + "/" + str.tostring(blkZone), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 13, "Armed",   text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 13, str.tostring(armedCount), text_color = armedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
     table.cell(dash, 0, 14, "Filled",  text_color = dashTxt, bgcolor = dashBg)
@@ -813,10 +856,19 @@ if barstate.islast and showDash
     table.cell(dash, 0, 16, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 16, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
     // The distances actually being scored. These must equal your TVMT setup.
+    float slDist = na(pEntry) ? na : math.abs(pEntry - pSL)
+    float tpDist = na(pEntry) ? na : math.abs(pTP1 - pEntry)
     table.cell(dash, 0, 17, distMethod + " SL/TP1", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 17, na(pEntry) ? "-" : str.tostring(math.abs(pEntry - pSL), format.mintick) + "/" + str.tostring(math.abs(pTP1 - pEntry), format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 1, 17, na(slDist) ? "-" : str.tostring(slDist, format.mintick) + "/" + str.tostring(tpDist, format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
+    // Red here = the stop is too tight for this market, not too wide.
+    table.cell(dash, 0, 18, "MAE (wins)", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 18, maeWinN > 0 ? str.tostring(maeWin, "#.##") + " R" : "-", text_color = maeCol, bgcolor = dashBg)
+    // Win rate this payoff needs just to break even. Compare it with Win Rate.
+    table.cell(dash, 0, 19, "Breakeven WR", text_color = dashTxt, bgcolor = dashBg)
+    bool beCalcOk = not na(slDist) and not na(tpDist) and slDist > 0.0
+    table.cell(dash, 1, 19, beCalcOk ? str.tostring(100.0 / (1.0 + tpDist / slDist), "#.#") + " %" : "-", text_color = dashTxt, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 17
+    for r = 0 to 19
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)

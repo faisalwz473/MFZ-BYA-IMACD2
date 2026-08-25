@@ -17,6 +17,40 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## Recommended starting configuration
+
+Measured from the live XAUUSD 15m run: 2870 signals, 36.3% win rate, 63.7% SL hit,
+expectancy **−0.129 R** per signal against TVMT's binary SL 1.0R / TP1 1.4R exit.
+
+At a 1.4R payoff the break-even win rate is **41.7%**. The run came in at 36.3% — a 5.4
+point shortfall. The same shortfall shows up at every target (TP2 needs 33.3%, got 28.1%;
+TP3 needs 29.4%, got 24.3%), and that uniformity is the tell: this is an **entry price**
+problem, not a target-selection problem. Fixing where trades are entered lifts all three
+at once.
+
+Start here, then tune one input at a time against the Expectancy row:
+
+| Where | Setting | Value |
+|---|---|---|
+| TVMT | Positions Per Signal | **1** while validating — 10 multiplies a negative edge, it does not fix it |
+| Indicator 1b | Trade With The Trend Only | on, EMA 50 |
+| Indicator 1b | Skip Signals Already Extended | on, 1.5 ATR |
+| Indicator 1b | Wait For Pullback | on, 0.5 ATR, 6 bars |
+| Indicator 1b | Cooldown | 10 bars |
+| Indicator 7 | Exit Model | `Single TP (TVMT ladder OFF)` — matches TVMT today |
+
+Then read three rows in this order:
+
+1. **Expectancy** — the only row that decides anything. Positive or it does not trade.
+2. **Breakeven WR** — the win rate your current SL/TP ratio needs. Compare with Win Rate.
+   If Win Rate sits below it, the setup loses no matter how good it feels.
+3. **MAE (wins)** — average heat a winning trade survived, in R. **If this is 0.7 R or
+   more it turns red: your stop is inside normal noise.** Winners are only just escaping
+   it, which means the loss column contains trades that a wider stop would have won.
+   That is the moment to enable `Floor The Stop At A Minimum ATR Distance`.
+
+`Blk T/E/C/S/Z` reconciles exactly: `Raw Crosses = T + E + C + S + Z + Armed`.
+
 ## Entry timing — the late-entry fix
 
 The raw Impulse MACD cross is a **late** event by construction. `md` is built from
@@ -46,6 +80,7 @@ Group **1b - Entry Timing (Late Entry Fix)** in Settings:
 | Pullback Depth (x ATR) | 0.5 | How far price must come back before the entry is accepted. |
 | Pullback Window (bars) | 6 | How long the armed signal waits. No pullback in the window = **no trade at all**. |
 | Entry Price Sent To TVMT | Fill bar close | Use `Fill bar close` for market orders. `Pullback level` is only correct if TVMT places a pending **limit** order. |
+| Trade Only Inside A Session | **off** | Gold is thin and mean-reverting outside London/New York, which is where a momentum crossover bleeds. Default session `0700-2000`. |
 | Cooldown After A Signal (bars) | 10 | Minimum bars between accepted signals. Stops the clusters of three SELLs in four bars. |
 | Floor The Stop At A Minimum ATR Distance | **off** | Widens the stop when the fixed pip distance is tighter than normal noise. |
 | Minimum Stop Distance (x ATR) | 1.5 | Only widens, never tightens. Take profits stay put, so this lowers R:R — measure before keeping it. |
