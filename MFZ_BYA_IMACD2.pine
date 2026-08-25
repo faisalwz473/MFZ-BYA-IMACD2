@@ -212,6 +212,7 @@ beOffR    = input.float(0.0, "Breakeven SL Offset (x SL distance)", minval = 0.0
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
+dashMode   = input.string("Compact (decision rows only)", "Dashboard Detail", options = ["Compact (decision rows only)", "Full (all diagnostics)"], group = G_DASH, tooltip = "Compact shows the eight rows that decide anything and fits on screen. Full adds every diagnostic underneath, which on a short chart window can run off the bottom.\nEither way the decision rows are at the TOP, so they are always visible.", display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
 dashTxt    = input.color(color.white, "Dashboard Text Colour", group = G_DASH, display = display.none)
@@ -909,8 +910,10 @@ f_pct(int part, int total) =>
     t > 0 ? str.tostring(p / t * 100.0, "#.#") + " %" : "-"
 
 if barstate.islast and showDash
-    float fWins  = winCount     // cast to float: int / int would truncate to 0
-    float fTotal = totalTrades
+    bool full = dashMode == "Full (all diagnostics)"
+
+    float fWins   = winCount    // cast to float: int / int would truncate to 0
+    float fTotal  = totalTrades
     float winRate = fTotal > 0 ? fWins / fTotal * 100.0 : 0.0
     color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
 
@@ -919,36 +922,40 @@ if barstate.islast and showDash
     float tpDist = na(pEntry) ? na : math.abs(pTP1 - pEntry)
     bool  distOk = not na(slDist) and not na(tpDist) and slDist > 0.0
 
-    // EXPECTANCY, NET OF COSTS. This is the number that decides everything. A
-    // 52% win rate is fine at 1:1 gross and hopeless once a spread worth 0.2 R
-    // is charged against it, so this row is reported after costs, never before.
+    // EXPECTANCY, NET OF COSTS.
     float expR    = fTotal > 0 ? sumR / fTotal : 0.0
     color expCol  = expR > 0.0 ? dashWinCol : dashLosCol
 
-    // Cost as a share of one R. Above 0.10 the stop is too tight for the
-    // spread and no realistic edge survives the round trip.
+    // Cost as a share of one R. Above 0.10 no realistic edge survives.
     float costR   = distOk ? costPips * pipPrice / slDist : na
     color costCol = not na(costR) and costR >= 0.10 ? dashLosCol : dashTxt
 
-    // Average heat survived by the winners. Approaching 1.0 R means the stop is
-    // inside normal noise: the winners are only just escaping it, so the losers
-    // almost certainly include trades that would have won with a wider stop.
-    float fMaeN   = maeWinN
-    float maeWin  = maeWinN > 0 ? maeWinSum / fMaeN : 0.0
-    color maeCol  = maeWin >= 0.7 ? dashLosCol : dashTxt
+    // THE EDGE TEST. A driftless entry hits the target first with probability
+    // SL/(SL+TP). That is the coin-flip win rate for these exact levels, and a
+    // zero-edge entry has zero expectancy at EVERY ratio - so if this is not
+    // positive, retuning stops and targets cannot help. Fix the signal.
+    float randWR  = distOk ? 100.0 * slDist / (slDist + tpDist) : na
+    float edgePP  = na(randWR) ? na : winRate - randWR
+    color edgeCol = not na(edgePP) and edgePP > 0.0 ? dashWinCol : dashLosCol
 
-    // Share of trades the simulator had to guess on, and the stop measured in
-    // ATR. A stop well under 1 ATR sits inside a single bar's noise, which is
-    // what drives the guessing in the first place.
+    // SIGNIFICANCE. A few points of edge is ordinary luck at these sample
+    // sizes, so screen on this, never on the pp figure above it.
+    float pRand   = na(randWR) ? na : randWR / 100.0
+    float seWR    = na(pRand) or fTotal <= 0 ? na : math.sqrt(pRand * (1.0 - pRand) / fTotal) * 100.0
+    float zEdge   = na(seWR) or seWR <= 0.0 ? na : edgePP / seWR
+    color zCol    = not na(zEdge) and zEdge >= 2.0 ? dashWinCol : dashLosCol
+
+    // TRUST. Ambiguous = share of trades where one bar touched both levels and
+    // the order had to be guessed. SL in ATR = stop in average bar ranges.
     float ambigPct = fTotal > 0 ? 100.0 * ambigCount / fTotal : na
     color ambigCol = not na(ambigPct) and ambigPct >= 20.0 ? dashLosCol : dashTxt
     float slAtrX   = distOk and nz(atrVal, 0.0) > 0.0 ? slDist / atrVal : na
     color slAtrCol = not na(slAtrX) and slAtrX < 0.5 ? dashLosCol : dashTxt
 
-    // 90th percentile of winner heat. Sorting a copy is fine here: this whole
-    // block only executes on the last bar. A stop set at this fraction of the
-    // current one would still have caught 90% of the winners, while making
-    // every loss that much smaller and lifting the reward-to-risk ratio.
+    // Heat the winners survived, mean and 90th percentile.
+    float fMaeN   = maeWinN
+    float maeWin  = maeWinN > 0 ? maeWinSum / fMaeN : 0.0
+    color maeCol  = maeWin >= 0.7 ? dashLosCol : dashTxt
     float maeP90 = na
     if array.size(maeWins) > 0
         tmp = array.copy(maeWins)
@@ -957,110 +964,103 @@ if barstate.islast and showDash
         int i90 = math.max(0, math.min(n90 - 1, int(math.ceil(0.90 * n90)) - 1))
         maeP90 := array.get(tmp, i90)
 
-    // THE EDGE TEST.
-    // A driftless random entry with a stop at distance a and a target at
-    // distance b hits the target first with probability a / (a + b). That is
-    // the win rate a coin flip produces with YOUR levels, and it is the bar any
-    // signal must clear to be worth anything at all.
-    //
-    // The consequence is easy to miss: a zero-edge entry has exactly ZERO
-    // expectancy at EVERY SL/TP ratio, so if this row is not positive, no
-    // amount of retuning stops and targets can help - there is nothing there to
-    // optimise, and the spread turns the coin flip into a guaranteed loss.
-    // Fix the signal, not the levels.
-    float randWR  = distOk ? 100.0 * slDist / (slDist + tpDist) : na
-    float edgePP  = na(randWR) ? na : winRate - randWR
-    color edgeCol = not na(edgePP) and edgePP > 0.0 ? dashWinCol : dashLosCol
+    // Win rate needed to break even, INCLUDING the cost: (1 + cost) / (1 + tp).
+    float beWR  = distOk ? 100.0 * (1.0 + costR) / (1.0 + tpDist / slDist) : na
+    color beCol = not na(beWR) and winRate >= beWR ? dashWinCol : dashLosCol
 
-    // SIGNIFICANCE. With a few hundred trades a 2 pp gap is ordinary noise, so
-    // a raw edge number invites chasing ghosts. This is how many standard
-    // errors the edge sits from the coin flip:
-    //     SE = sqrt(p(1-p)/n) with p = the random win rate.
-    // Below 2 sigma the result is indistinguishable from luck no matter how
-    // green the row above looks. Screen on THIS, not on the pp figure.
-    float pRand   = na(randWR) ? na : randWR / 100.0
-    float seWR    = na(pRand) or fTotal <= 0 ? na : math.sqrt(pRand * (1.0 - pRand) / fTotal) * 100.0
-    float zEdge   = na(seWR) or seWR <= 0.0 ? na : edgePP / seWR
-    color zCol    = not na(zEdge) and zEdge >= 2.0 ? dashWinCol : dashLosCol
+    // -------------------------------------------------------------------------
+    //  Rows are emitted through a running counter so Compact mode simply skips
+    //  the diagnostics. The eight rows that decide anything come FIRST, so they
+    //  stay visible even when the table is taller than the chart window.
+    // -------------------------------------------------------------------------
+    int r = 0
+    table.cell(dash, 0, r, "Engine", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, signalMode, text_color = dashTxt, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "Signals", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "EDGE vs rnd", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, na(edgePP) ? "-" : (edgePP >= 0.0 ? "+" : "") + str.tostring(edgePP, "#.#") + " pp", text_color = edgeCol, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "Edge sigma", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, na(zEdge) ? "-" : str.tostring(zEdge, "#.##") + (zEdge >= 2.0 ? " OK" : " noise"), text_color = zCol, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "Exp net R", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, str.tostring(expR, "#.###") + " R", text_color = expCol, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "Cost/R", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, na(costR) ? "-" : str.tostring(costR, "#.###") + " R", text_color = costCol, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "Ambiguous", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, na(ambigPct) ? "-" : str.tostring(ambigPct, "#.#") + " %", text_color = ambigCol, bgcolor = dashBg)
+    r += 1
+    table.cell(dash, 0, r, "SL in ATR", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, r, na(slAtrX) ? "-" : str.tostring(slAtrX, "#.##") + " ATR", text_color = slAtrCol, bgcolor = dashBg)
+    r += 1
 
-    // Win rate this payoff needs to break even, INCLUDING the cost.
-    // p = (1 + cost) / (1 + tp), all in R.
-    float beWR    = distOk ? 100.0 * (1.0 + costR) / (1.0 + tpDist / slDist) : na
-    color beCol   = not na(beWR) and winRate >= beWR ? dashWinCol : dashLosCol
+    if full
+        table.cell(dash, 0, r, "Win Rate", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(winRate, "#.#") + " %", text_color = rateCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Random WR", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, na(randWR) ? "-" : str.tostring(randWR, "#.#") + " %", text_color = dashTxt, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Breakeven WR", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, na(beWR) ? "-" : str.tostring(beWR, "#.#") + " %", text_color = beCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Total R", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(sumR, "#.#") + " R", text_color = sumR > 0.0 ? dashWinCol : dashLosCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Wins", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(winCount), text_color = dashWinCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Losses", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(lossCount), text_color = dashLosCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "SL Hit", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "TP1 Hit", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg)
+        r += 1
+        // TP2/TP3 read "off" under Single TP: TVMT never sends those targets.
+        table.cell(dash, 0, r, "TP2 Hit", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, ladderOn ? f_pct(t2Count, totalTrades) : "off", text_color = tp2Col, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "TP3 Hit", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, ladderOn ? f_pct(t3Count, totalTrades) : "off", text_color = tp3Col, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "MAE (wins)", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, maeWinN > 0 ? str.tostring(maeWin, "#.##") + " R" : "-", text_color = maeCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "MAE p90 -> SL", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, na(maeP90) or not distOk ? "-" : str.tostring(maeP90, "#.##") + "R = " + str.tostring(maeP90 * slDist / pipPrice, "#") + "p", text_color = dashTxt, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Blk T/E/C/S/Z", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool) + "/" + str.tostring(blkSess) + "/" + str.tostring(blkZone), text_color = dashTxt, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Armed", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(armedCount), text_color = armedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Filled", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Expired", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(expiredCount), text_color = dashTxt, bgcolor = dashBg)
+        r += 1
+        table.cell(dash, 0, r, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+        r += 1
+        // These distances must equal your TVMT Trading Setup.
+        table.cell(dash, 0, r, distMethod + " SL/TP1", text_color = dashTxt, bgcolor = dashBg)
+        table.cell(dash, 1, r, na(slDist) ? "-" : str.tostring(slDist, format.mintick) + "/" + str.tostring(tpDist, format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
+        r += 1
 
-    table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 0, (ladderOn ? "LADDER" : "1-TP") + (sendLevels ? " IND" : " TVMT"), text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 2, str.tostring(winCount), text_color = dashWinCol, bgcolor = dashBg)
-    table.cell(dash, 0, 3, "Losses",   text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 3, str.tostring(lossCount), text_color = dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 4, "Win Rate", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 4, str.tostring(winRate, "#.#") + " %", text_color = rateCol, bgcolor = dashBg)
-    table.cell(dash, 0, 5, "Exp net R", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 5, str.tostring(expR, "#.###") + " R", text_color = expCol, bgcolor = dashBg)
-    table.cell(dash, 0, 6, "Cost/R",   text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 6, na(costR) ? "-" : str.tostring(costR, "#.###") + " R", text_color = costCol, bgcolor = dashBg)
-    table.cell(dash, 0, 7, "Total R",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 7, str.tostring(sumR, "#.#") + " R", text_color = sumR > 0.0 ? dashWinCol : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 8, "SL Hit",   text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 8, f_pct(slCount, totalTrades), text_color = slCol, bgcolor = dashBg)
-    table.cell(dash, 0, 9, "TP1 Hit",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 9, f_pct(t1Count, totalTrades), text_color = tp1Col, bgcolor = dashBg)
-    // TP2/TP3 stay "off" while the exit model is Single TP - that is correct,
-    // TVMT never sends those targets to the broker when its ladder is off.
-    table.cell(dash, 0, 10, "TP2 Hit", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 10, ladderOn ? f_pct(t2Count, totalTrades) : "off", text_color = tp2Col, bgcolor = dashBg)
-    table.cell(dash, 0, 11, "TP3 Hit", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 11, ladderOn ? f_pct(t3Count, totalTrades) : "off", text_color = tp3Col, bgcolor = dashBg)
-    table.cell(dash, 0, 12, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 12, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 13, "Blk T/E/C/S/Z", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 13, str.tostring(blkTrend) + "/" + str.tostring(blkExt) + "/" + str.tostring(blkCool) + "/" + str.tostring(blkSess) + "/" + str.tostring(blkZone), text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 0, 14, "Armed",   text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 14, str.tostring(armedCount), text_color = armedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 15, "Filled",  text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 15, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 16, "Expired", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 16, str.tostring(expiredCount), text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 0, 17, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 17, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    // The distances actually being scored. These must equal your TVMT setup.
-    table.cell(dash, 0, 18, distMethod + " SL/TP1", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 18, na(slDist) ? "-" : str.tostring(slDist, format.mintick) + "/" + str.tostring(tpDist, format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
-    // Red here = the stop is too tight for this market, not too wide.
-    table.cell(dash, 0, 19, "MAE (wins)", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 19, maeWinN > 0 ? str.tostring(maeWin, "#.##") + " R" : "-", text_color = maeCol, bgcolor = dashBg)
-    // Green only when Win Rate actually clears this bar.
-    table.cell(dash, 0, 20, "Breakeven WR", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 20, na(beWR) ? "-" : str.tostring(beWR, "#.#") + " %", text_color = beCol, bgcolor = dashBg)
-    // The tightest stop that still keeps 9 of every 10 current winners, shown
-    // both in R and as the distance to type into group 2 and into TVMT.
-    table.cell(dash, 0, 21, "MAE p90 -> SL", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 21, na(maeP90) or not distOk ? "-" : str.tostring(maeP90, "#.##") + "R = " + str.tostring(maeP90 * slDist / pipPrice, "#") + "p", text_color = dashTxt, bgcolor = dashBg)
-    // Coin-flip win rate for these exact levels: SL / (SL + TP).
-    table.cell(dash, 0, 22, "Random WR", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 22, na(randWR) ? "-" : str.tostring(randWR, "#.#") + " %", text_color = dashTxt, bgcolor = dashBg)
-    // THE row. Not positive here means the signal adds nothing over a coin flip,
-    // and no stop/target tuning can rescue it.
-    table.cell(dash, 0, 23, "EDGE vs rnd", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 23, na(edgePP) ? "-" : (edgePP >= 0.0 ? "+" : "") + str.tostring(edgePP, "#.#") + " pp", text_color = edgeCol, bgcolor = dashBg)
-    // Green only at 2 sigma or better. Anything less is luck, however green
-    // the row above looks. This is the row to screen engines on.
-    table.cell(dash, 0, 24, "Edge sigma", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 24, na(zEdge) ? "-" : str.tostring(zEdge, "#.##") + (zEdge >= 2.0 ? " OK" : " noise"), text_color = zCol, bgcolor = dashBg)
-    // Which engine produced the numbers above, so screenshots are self-labelling.
-    table.cell(dash, 0, 25, "Engine", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 25, signalMode, text_color = dashTxt, bgcolor = dashBg)
-    // Red = the table above is mostly guesswork about what happened inside bars.
-    table.cell(dash, 0, 26, "Ambiguous", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 26, na(ambigPct) ? "-" : str.tostring(ambigPct, "#.#") + " %", text_color = ambigCol, bgcolor = dashBg)
-    // Red = the stop is inside a single bar's normal range.
-    table.cell(dash, 0, 27, "SL in ATR", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 27, na(slAtrX) ? "-" : str.tostring(slAtrX, "#.##") + " ATR", text_color = slAtrCol, bgcolor = dashBg)
-
-    // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 27
+    // apply the chosen dashboard text size to every populated cell
+    for i = 0 to r - 1
         for c = 0 to 1
-            table.cell_set_text_size(dash, c, r, dashSizeV)
+            table.cell_set_text_size(dash, c, i, dashSizeV)

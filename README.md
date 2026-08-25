@@ -38,6 +38,44 @@ not on the cross bar. To see the raw cross for comparison, untick the trend and 
 filters and set Cooldown to 0 and `Wait For Pullback` off — that reproduces a plain
 crossover indicator.
 
+## Reading the dashboard
+
+`Dashboard Detail` in group 5 has two settings. **Compact** (default) shows the eight rows
+that decide anything and fits on screen. **Full** adds every diagnostic underneath.
+
+Either way the decision rows are at the **top**, so they stay visible even when the table
+is taller than the chart window:
+
+| Row | What it answers |
+|---|---|
+| `Engine` | which signal produced these numbers |
+| `Signals` | is the sample big enough to mean anything |
+| `EDGE vs rnd` | does the signal beat a coin flip |
+| `Edge sigma` | **is that difference real** — screen on this |
+| `Exp net R` | expectancy after costs |
+| `Cost/R` | is the spread affordable at this stop |
+| `Ambiguous` | can the simulator resolve these trades at all |
+| `SL in ATR` | is the stop inside one bar's noise |
+
+The last two are trust rows. If either is red, everything above it is unreliable and the
+stop needs to move before any of it is worth reading.
+
+## Progress log
+
+Every clean measurement so far on XAUUSD, Impulse MACD engine, SL 500 / TP1 700:
+
+| Run | Trades | Edge vs random | Sigma | Verdict |
+|---|---|---|---|---|
+| 15m, before the guards | 2870 | −5.4 pp | −5.87 | significantly **worse** than a coin flip |
+| 15m, after the guards | 632 | −1.0 pp | −0.51 | noise |
+| 5m, after the guards | 674 | +0.9 pp | +0.48 | noise |
+
+The entry-timing work removed a real, statistically significant negative edge. What
+followed is three runs of nothing: the sign changes, the magnitude does not clear noise.
+
+A +0.9 pp edge would need roughly **11,600 trades** to reach 2 sigma. That is not a result
+waiting for more data — it is the absence of one.
+
 ## When the dashboard cannot be trusted
 
 Two rows say whether the numbers above them mean anything.
