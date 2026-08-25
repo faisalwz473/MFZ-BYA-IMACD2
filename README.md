@@ -17,6 +17,56 @@ Three other modes are selectable in Settings:
 `Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
 `MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
 
+## Matching a reference Impulse MACD on the chart
+
+The markers will not line up with a LazyBear `IMACD_LB` plotted in a sub-pane unless two
+things match.
+
+**1. The lengths.** This script defaults to **MA 10 / Signal 3**. LazyBear's original is
+**34 / 9**, and `IMACD_LB 24 9` means 24 / 9. Different lengths are different indicators —
+set `Impulse MA Length` and `Signal Line Length` in group 1 to whatever the reference uses.
+
+**2. The guards.** Even with identical lengths the markers will still not appear at every
+cross, by design. The pipeline discards most crosses and delays the rest:
+
+```
+Raw Crosses 2872  ->  Armed 917  ->  Filled 632
+```
+
+Roughly one cross in five becomes a trade, and the marker prints on the **pullback bar**,
+not on the cross bar. To see the raw cross for comparison, untick the trend and extension
+filters and set Cooldown to 0 and `Wait For Pullback` off — that reproduces a plain
+crossover indicator.
+
+## When the dashboard cannot be trusted
+
+Two rows say whether the numbers above them mean anything.
+
+**`SL in ATR`** — the stop measured in average bar ranges. **Red below 0.5.** A 150 pip
+(1.500) stop against a typical XAUUSD 15m ATR of ~4.5 is **0.33 ATR**: the stop is a third
+of one average bar.
+
+**`Ambiguous`** — the share of trades where a single bar touched **both** the stop and the
+target, so the simulator had to guess which came first from the bar open. **Red above 20%.**
+
+When the stop sits inside one bar's range, nearly every trade is ambiguous and the table
+stops being a measurement of the strategy — it becomes a coin toss over bar internals.
+`MAE (wins)` reporting **6.43 R** against a 1 R stop is that failure showing itself: a live
+trade cannot run 6.43 R against you, because it would have been stopped at 1 R. MAE is now
+capped at 1.0 R for that reason, but the cap treats the symptom; `Ambiguous` names the cause.
+
+A stop that tight is also unusable for a second, independent reason: at a 0.30 spread it
+hands **0.199 R** to the broker on every trade.
+
+| Stop | In ATR | Cost/R |
+|---|---|---|
+| 150 pips | 0.33 | 0.199 |
+| 500 pips | 1.11 | 0.060 |
+| 600 pips | 1.33 | 0.050 |
+
+Keep the stop above **1 ATR** and `Cost/R` under **0.05**, or the dashboard is measuring
+noise and the account is paying the spread to find that out.
+
 ## Using this as an edge screener
 
 The harness is now the valuable part. Timing guards, pullback entry, levels, alerts,

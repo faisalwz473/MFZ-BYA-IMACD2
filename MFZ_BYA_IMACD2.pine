@@ -763,6 +763,12 @@ var float sumR        = 0.0 // total R across every closed trade
 var float maeWinSum = 0.0
 var int   maeWinN   = 0
 
+// How often one bar touched BOTH the stop and the target, so the simulator had
+// to guess which came first from the bar open. This is the trust indicator for
+// every number in the table: guessing on most trades means the results are
+// closer to a coin toss over bar internals than a measurement of the strategy.
+var int ambigCount = 0
+
 // Every winner's heat, kept so a percentile can be taken. The MEAN says whether
 // the stop is roughly sane; the 90th PERCENTILE says how tight it could go
 // while still keeping 9 out of 10 of the winners it currently produces.
@@ -778,7 +784,11 @@ if showDash and barstate.isconfirmed
     // ---- 1) walk the open virtual trade forward with this bar's range ----
     if vDir != 0
         // Track heat first, so the bar that resolves the trade still counts.
-        float advR = (vDir == 1 ? vEntry - low : high - vEntry) / vR
+        // Capped at 1.0: a live trade physically cannot run further against you
+        // than its own stop, because it would have been closed there. Without
+        // the cap, a bar that spans both levels and gets resolved as a win
+        // records the WHOLE bar as heat and reports impossible values.
+        float advR = math.min((vDir == 1 ? vEntry - low : high - vEntry) / vR, 1.0)
         vMAE := math.max(vMAE, advR)
 
         // R multiples of each target, so every trade is scored on one scale.
@@ -795,7 +805,10 @@ if showDash and barstate.isconfirmed
         bool t3Hit = vDir == 1 ? high >= vT3 : low  <= vT3
 
         // Same-bar ambiguity: assume the level nearer to the open was hit first.
-        bool slFirst = slHit and t1Hit ? math.abs(open - curSL) <= math.abs(open - vT1) : slHit
+        bool ambiguous = slHit and t1Hit
+        bool slFirst = ambiguous ? math.abs(open - curSL) <= math.abs(open - vT1) : slHit
+        if ambiguous
+            ambigCount += 1
         bool  done  = false
         float bookR = 0.0
         float costR = (costPips * pipPrice) / vR   // round trip expressed in R
@@ -888,7 +901,7 @@ if showDash and barstate.isconfirmed
         vMAE   := 0.0
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 26, border_width = 1)
+var table dash = table.new(position.top_right, 2, 28, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -923,6 +936,14 @@ if barstate.islast and showDash
     float fMaeN   = maeWinN
     float maeWin  = maeWinN > 0 ? maeWinSum / fMaeN : 0.0
     color maeCol  = maeWin >= 0.7 ? dashLosCol : dashTxt
+
+    // Share of trades the simulator had to guess on, and the stop measured in
+    // ATR. A stop well under 1 ATR sits inside a single bar's noise, which is
+    // what drives the guessing in the first place.
+    float ambigPct = fTotal > 0 ? 100.0 * ambigCount / fTotal : na
+    color ambigCol = not na(ambigPct) and ambigPct >= 20.0 ? dashLosCol : dashTxt
+    float slAtrX   = distOk and nz(atrVal, 0.0) > 0.0 ? slDist / atrVal : na
+    color slAtrCol = not na(slAtrX) and slAtrX < 0.5 ? dashLosCol : dashTxt
 
     // 90th percentile of winner heat. Sorting a copy is fine here: this whole
     // block only executes on the last bar. A stop set at this fraction of the
@@ -1032,8 +1053,14 @@ if barstate.islast and showDash
     // Which engine produced the numbers above, so screenshots are self-labelling.
     table.cell(dash, 0, 25, "Engine", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 25, signalMode, text_color = dashTxt, bgcolor = dashBg)
+    // Red = the table above is mostly guesswork about what happened inside bars.
+    table.cell(dash, 0, 26, "Ambiguous", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 26, na(ambigPct) ? "-" : str.tostring(ambigPct, "#.#") + " %", text_color = ambigCol, bgcolor = dashBg)
+    // Red = the stop is inside a single bar's normal range.
+    table.cell(dash, 0, 27, "SL in ATR", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 27, na(slAtrX) ? "-" : str.tostring(slAtrX, "#.##") + " ATR", text_color = slAtrCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 25
+    for r = 0 to 27
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)
