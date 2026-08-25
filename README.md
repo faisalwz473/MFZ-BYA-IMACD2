@@ -91,6 +91,40 @@ Change one input at a time and re-read the table.
 - Every marker shape, marker colour and line colour is an input.
 - Every input uses `display = display.none`, so the chart status line shows only the indicator name.
 
+## Who owns SL / TP — read this before trusting the dashboard
+
+TVMT's **Trading Setup** page can apply its own SL/TP to every trade. When it does, the
+levels this indicator draws are **not** the levels being traded, and the consequence is
+easy to miss:
+
+> The win-rate dashboard replays trades against the indicator's own SL/TP inputs. If TVMT
+> is applying different distances, the dashboard is scoring **a different strategy from
+> the one running on your account**. Win Rate, SL Hit and the TP1/TP2/TP3 percentages all
+> describe a setup you are not trading.
+
+The fix does not depend on which side wins the payload argument:
+
+**Type the same distances into group `2 - Distance Method` that TVMT's Trading Setup
+uses.** Once chart, dashboard and account agree, the dashboard becomes a real instrument
+again and it stops mattering whether TVMT reads the payload or its own page.
+
+`Who Sets SL / TP` in group **6 - Alerts** makes the choice explicit:
+
+| Setting | Payload | Use when |
+|---|---|---|
+| `Indicator sends SL / TP to TVMT` (default) | full JSON with `entry`/`sl`/`tp`/`tp2`/`tp3` | TVMT honours the levels in the webhook |
+| `TVMT Trading Setup (indicator levels are display only)` | `symbol`, `action`, `tv_time`, `tv_alert_id` only | TVMT applies its own Trading Setup levels |
+
+TVMT mode reduces the payload to exactly the template the TVMT portal generates, so the
+bridge can never be fed one set of numbers while the Trading Setup page applies another.
+It applies to the **One alert (alert function)** method only — `alertcondition()` messages
+must be compile-time constants, so the two-alert path always sends levels.
+
+The dashboard now shows which mode is active next to the distance method (`Pip IND` or
+`Pip TVMT`), and its bottom row shows the SL / TP1 distances in price. In TVMT mode that
+row is labelled **MATCH TVMT** in red: those two numbers must equal your Trading Setup, or
+every number above them is fiction.
+
 ## A note on the outer braces
 
 The TVMT portal generates its own alert template **without** the outer `{ }`, noting that

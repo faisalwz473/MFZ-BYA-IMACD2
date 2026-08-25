@@ -162,6 +162,7 @@ labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small"
 // -----------------------------------------------------------------------------
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
+levelSrc   = input.string("Indicator sends SL / TP to TVMT", "Who Sets SL / TP", options = ["Indicator sends SL / TP to TVMT", "TVMT Trading Setup (indicator levels are display only)"], group = G_ALERT, tooltip = "CHECK THIS AGAINST YOUR TVMT TRADING SETUP PAGE.\nIf TVMT applies its own SL/TP, the levels this script draws are NOT the ones being traded, and the win rate dashboard is measuring a different strategy from your account.\nEither way the fix is the same: type the SAME distances into group 2 that TVMT uses, so chart, dashboard and account all agree.\nTVMT mode drops entry/sl/tp/tp2/tp3 from the payload so there is no ambiguity about which side wins. Applies to the One alert (alert function) method only - alertcondition() messages must be compile-time constants, so the two-alert path always sends levels.", display = display.none)
 jsonBraces = input.bool(true, "Wrap Alert JSON In Outer Braces", group = G_ALERT, tooltip = "The TVMT portal shows its own template WITHOUT the outer { } and notes that this stops TradingView flagging the message as JSON. Your current setup sends them and is executing fine, so this defaults to ON - untick it only if TVMT starts rejecting payloads.\nApplies to the One alert (alert function) method only: TradingView requires alertcondition() messages to be compile-time constants, so the two-alert path is always braced.", display = display.none)
 alertMode  = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALERT, tooltip = "Two alerts: create one alert per condition. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker. Immune to the double-fire problem.", display = display.none)
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
@@ -585,15 +586,20 @@ alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": 
 //  its "action" always matches the marker on the chart.
 //  Set the alert up as: Condition "BYA IMACD1" -> "Any alert() function call".
 // -----------------------------------------------------------------------------
+bool sendLevels = levelSrc == "Indicator sends SL / TP to TVMT"
+
 f_json(string action) =>
     string j = jsonBraces ? '{\n' : ''
     j += '  "symbol": "' + syminfo.ticker + '",\n'
     j += '  "action": "' + action + '",\n'
-    j += '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
-    j += '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
-    j += '  "tp": '    + str.tostring(nz(pTP1,   close), format.mintick) + ',\n'
-    j += '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
-    j += '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
+    // Levels are omitted entirely when TVMT owns them, so the bridge cannot be
+    // fed one set of numbers while the Trading Setup page applies another.
+    if sendLevels
+        j += '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
+        j += '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
+        j += '  "tp": '    + str.tostring(nz(pTP1,   close), format.mintick) + ',\n'
+        j += '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
+        j += '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
     j += '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
     j += '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
     j += jsonBraces ? '}' : ''
@@ -682,7 +688,7 @@ if showDash and barstate.isconfirmed
         vGotT3 := false
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 15, border_width = 1)
+var table dash = table.new(position.top_right, 2, 16, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -696,7 +702,7 @@ if barstate.islast and showDash
     color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
 
     table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 0, distMethod,       text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 0, distMethod + (sendLevels ? " IND" : " TVMT"), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg)
@@ -725,8 +731,12 @@ if barstate.islast and showDash
     table.cell(dash, 1, 13, str.tostring(expiredCount), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 14, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 14, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    // The distances the dashboard is actually scoring. If TVMT owns SL/TP, these
+    // MUST match the Trading Setup page or the win rate below is fiction.
+    table.cell(dash, 0, 15, sendLevels ? "SL/TP1 px" : "MATCH TVMT", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 15, na(pEntry) ? "-" : str.tostring(math.abs(pEntry - pSL), format.mintick) + " / " + str.tostring(math.abs(pTP1 - pEntry), format.mintick), text_color = sendLevels ? dashTxt : dashLosCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 14
+    for r = 0 to 15
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)
