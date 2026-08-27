@@ -193,6 +193,7 @@ labSizeV   = input.string(size.small, "Label Text Size", options = [size.tiny, s
 // -----------------------------------------------------------------------------
 //  7. ALERTS
 // -----------------------------------------------------------------------------
+symOverride = input.string("", "Webhook Symbol Override", group = G_ALR, tooltip = "Leave empty to send the chart's own ticker. A TVC:GOLD chart sends \"GOLD\", which will not match a broker account that trades XAUUSD - type the broker's exact symbol here to send that instead. Only the One alert (alert function) method can honour this; {{ticker}} in an alertcondition message cannot be overridden.", display = display.none)
 alertMode = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALR, tooltip = "Two alerts: create one alert per condition, both with IDENTICAL settings.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker.", display = display.none)
 
 // -----------------------------------------------------------------------------
@@ -703,11 +704,17 @@ bool inBeBB = f_manageZones(beBbArr, false)
 //  plots to the alert placeholders. nz(..., close) guarantees a finite number,
 //  so a level is never na on the bar the alert fires.
 // =============================================================================
-plot(nz(pEntry, close), title = "entry", display = display.none)
-plot(nz(pSL,    close), title = "sl",    display = display.none)
-plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
-plot(nz(pTP2,   close), title = "tp2",   display = display.none)
-plot(nz(pTP3,   close), title = "tp3",   display = display.none)
+//  display.data_window, NOT display.none. A display.none plot is not reliably
+//  fed to {{plot("...")}}: TradingView drops the placeholder it cannot resolve,
+//  strips that line out of the alert message and shows a warning on it - which
+//  silently sends a payload with no entry, sl or tp at all. data_window keeps
+//  the plot off the chart pane AND out of the status line, but keeps its value
+//  available to the placeholder.
+plot(nz(pEntry, close), title = "entry", display = display.data_window)
+plot(nz(pSL,    close), title = "sl",    display = display.data_window)
+plot(nz(pTP1,   close), title = "tp",    display = display.data_window)   // "tp" carries TP1
+plot(nz(pTP2,   close), title = "tp2",   display = display.data_window)
+plot(nz(pTP3,   close), title = "tp3",   display = display.data_window)
 
 // =============================================================================
 //  TVMT WEBHOOK ALERTS - the message box must contain ONLY this JSON.
@@ -738,7 +745,8 @@ alertcondition(inBeBB, title = "Price In Bearish BB Zone", message = "Price in t
 // -----------------------------------------------------------------------------
 f_json(string action) =>
     string j = '{\n'
-    j := j + '  "symbol": "' + syminfo.ticker + '",\n'
+    string sym = str.length(symOverride) > 0 ? symOverride : syminfo.ticker
+    j := j + '  "symbol": "' + sym + '",\n'
     j := j + '  "action": "' + action + '",\n'
     j := j + '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
     j := j + '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
@@ -746,7 +754,7 @@ f_json(string action) =>
     j := j + '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
     j := j + '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
     j := j + '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
-    j := j + '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
+    j := j + '  "tv_alert_id": "tv-' + sym + '-' + action + '-' + str.tostring(time) + '"\n'
     j := j + '}'
     j
 
