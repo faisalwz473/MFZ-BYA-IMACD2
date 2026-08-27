@@ -227,6 +227,7 @@ sessOvCol = input.color(color.new(color.orange, 25), "Overlap Band Colour", grou
 // -----------------------------------------------------------------------------
 //  10. WIN RATE DASHBOARD
 // -----------------------------------------------------------------------------
+scoreCuts = input.bool(true, "Score Trades Cut Short By The Next Signal", group = G_WIN, tooltip = "A trade that is still open when the opposite signal fires is closed at that bar and scored at whatever R it had reached. Leaving these out entirely biases the result upward, because a reversal signal tends to fire exactly when price has moved against the position - so the discarded trades are mostly losers. Untick to exclude them and count them under Cut instead.", display = display.none)
 showWin  = input.bool(true, "Show Win Rate Dashboard", group = G_WIN, tooltip = "Replays the indicator's OWN Buy/Sell entries against the SAME SL/TP levels across loaded history. A quick overview, not a tick-precise backtester.", display = display.none)
 winCol   = input.color(color.lime, "Win Text Colour", group = G_WIN, display = display.none)
 lossCol  = input.color(color.red, "Loss Text Colour", group = G_WIN, display = display.none)
@@ -792,6 +793,8 @@ var int   c1       = 0
 var int   c2       = 0
 var int   c3       = 0
 var float sumR     = 0.0
+var int   cCut     = 0
+var float sumCutR  = 0.0
 
 if confirmed and vState != 0
     // ---- PENDING: did the limit fill, or did it expire? ----------------
@@ -842,6 +845,12 @@ if confirmed and vState != 0
                 vState := 0
 
 if newSetup
+    // A LIVE trade that never reached SL or TP1 is closed at this bar rather
+    // than silently discarded, and booked at the R it had actually reached.
+    if vState == 2 and not vDone
+        float cutRisk = math.max(math.abs(vE - vS), pipPrice)
+        cCut    += 1
+        sumCutR += (close - vE) / cutRisk * (vDir == 1 ? 1.0 : -1.0)
     if vState == 1
         cExpired += 1          // an unfilled limit cancelled by the next signal
     cSignals += 1
@@ -865,12 +874,14 @@ if newSetup
 // even, at 1:1 it takes 50%. Expectancy in R is the number that decides
 // whether the entry has an edge, so it is reported next to the break-even
 // win rate the current SL/TP settings actually require.
+int   cScored = cRes + (scoreCuts ? cCut : 0)
+float totR    = sumR + (scoreCuts ? sumCutR : 0.0)
 float winRate = cRes > 0 ? 100.0 * cWin / cRes : na
 float pctSL   = cRes > 0 ? 100.0 * cSL  / cRes : na
 float pct1    = cRes > 0 ? 100.0 * c1   / cRes : na
 float pct2    = cRes > 0 ? 100.0 * c2   / cRes : na
 float pct3    = cRes > 0 ? 100.0 * c3   / cRes : na
-float expR    = cRes > 0 ? sumR / cRes : na
+float expR    = cScored > 0 ? totR / cScored : na
 float rrNow   = na(pEntry) or na(pSL) or na(pTP1) ? na : math.abs(pTP1 - pEntry) / math.max(math.abs(pEntry - pSL), pipPrice)
 float beWR    = na(rrNow) ? na : 100.0 / (1.0 + rrNow)
 float fillPct = cSignals > 0 ? 100.0 * cFilled / cSignals : na
@@ -973,7 +984,7 @@ color  filtBg  = minAligned == 0 ? trNeCol : filtBlocking ? trDnCol : trUpCol
 
 var table tTrend = table.new(f_pos(posTrend), 3, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
 var table tSess  = table.new(f_pos(posSess),  5, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
-var table tWin   = table.new(f_pos(posWin),   2, 15, bgcolor = transparent, border_width = 0, frame_width = 0)
+var table tWin   = table.new(f_pos(posWin),   2, 17, bgcolor = transparent, border_width = 0, frame_width = 0)
 
 if barstate.islast
     // ---------------- TREND METER (left-most) ----------------
@@ -1042,25 +1053,29 @@ if barstate.islast
         table.cell(tWin, 1, 2, str.tostring(cFilled) + " (" + f_pctTxt(fillPct) + ")", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tWin, 0, 3, "Expired", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tWin, 1, 3, str.tostring(cExpired), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 4, "Resolved", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 4, "Hit SL or TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tWin, 1, 4, str.tostring(cRes), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 5, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 5, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 6, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 6, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 7, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 7, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= nz(beWR, 100) ? winCol : lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 8, "Break-even WR", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 8, f_pctTxt(beWR), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 9, "Expectancy / trade", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 9, f_rTxt(expR), bgcolor = dashHdrBg, text_color = nz(expR, -1) > 0 ? winCol : lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 10, "Total R", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 10, f_rTxt(sumR), bgcolor = dashHdrBg, text_color = sumR > 0 ? winCol : lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 11, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 11, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 12, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 12, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 13, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 13, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 14, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 14, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 5, "Cut by reversal", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 5, str.tostring(cCut) + " (" + f_rTxt(sumCutR) + ")", bgcolor = dashBg, text_color = sumCutR >= 0 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 6, "Scored", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 6, str.tostring(cScored), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 7, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 7, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 8, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 8, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 9, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 9, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= nz(beWR, 100) ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 10, "Break-even WR", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 10, f_pctTxt(beWR), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 11, "Expectancy / trade", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 11, f_rTxt(expR), bgcolor = dashHdrBg, text_color = nz(expR, -1) > 0 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 12, "Total R", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 12, f_rTxt(totR), bgcolor = dashHdrBg, text_color = totR > 0 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 13, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 13, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 14, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 14, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 15, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 15, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 16, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 16, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
