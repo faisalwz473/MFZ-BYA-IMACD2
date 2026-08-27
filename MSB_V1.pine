@@ -1,3 +1,4 @@
+//@version=6
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //
 // ORIGINAL WORK:  "Market Structure Break & Order Block" (MSB-OB)  (c) EmreKb  - MPL-2.0
@@ -47,7 +48,6 @@
 //   sent per signal and its "action" always matches the marker on the chart.
 // =============================================================================
 
-//@version=6
 indicator("MSB V1", "MSB V1", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 4900)
 
 // =============================================================================
@@ -277,7 +277,7 @@ int trD2 = nz(request.security(syminfo.tickerid, tfD, f_tfTrend(), lookahead = b
 
 bool allUp = trA == 1 and trB == 1 and trC == 1 and trD2 == 1
 bool allDn = trA == -1 and trB == -1 and trC == -1 and trD2 == -1
-string focusTxt = allUp ? "FOCUS: BUY ONLY" : allDn ? "FOCUS: SELL ONLY" : "NO ALIGNMENT — STAND ASIDE"
+string focusTxt = allUp ? "FOCUS: BUY ONLY" : allDn ? "FOCUS: SELL ONLY" : "NO ALIGNMENT - STAND ASIDE"
 color  focusBg  = allUp ? trUpCol : allDn ? trDnCol : trNeCol
 
 // =============================================================================
@@ -402,8 +402,8 @@ if showMSB and sellSignal and not na(l1i) and not na(l1)
 float atrVal   = ta.atr(atrLen)
 float pipPrice = pipMode == "Manual" ? manualPip : 10.0 * syminfo.mintick
 
-f_dist(string method, float pipsVal, float atrMult, float pctVal, float entryP) =>
-    float d = method == "Pip" ? pipsVal * pipPrice : method == "ATR" ? nz(atrVal) * atrMult : entryP * pctVal / 100.0
+f_dist(string dMethod, float pipsVal, float atrMult, float pctVal, float entryP) =>
+    float d = dMethod == "Pip" ? pipsVal * pipPrice : dMethod == "ATR" ? nz(atrVal) * atrMult : entryP * pctVal / 100.0
     d
 
 // =============================================================================
@@ -761,8 +761,8 @@ f_sessState(int st, int en, int nowMin) =>
 
 f_loadBar(float prog, int w) =>
     int filled = int(math.max(0, math.min(w, math.round(prog * w))))
-    string full  = filled > 0 ? str.repeat("█", filled) : ""
-    string empty = (w - filled) > 0 ? str.repeat("░", w - filled) : ""
+    string full  = filled > 0 ? str.repeat("#", filled) : ""
+    string empty = (w - filled) > 0 ? str.repeat("-", w - filled) : ""
     full + empty
 
 [asiaSt, asiaEn] = f_sessBounds(asiaSess)
