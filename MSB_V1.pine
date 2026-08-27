@@ -222,8 +222,8 @@ dashSizeV = input.string(size.small, "Dashboard Text Size", options = [size.tiny
 dashBg    = input.color(color.new(color.black, 20), "Dashboard Background", group = G_LAY, display = display.none)
 dashHdrBg = input.color(color.new(color.blue, 40), "Dashboard Header Background", group = G_LAY, display = display.none)
 dashTxt   = input.color(color.white, "Dashboard Text Colour", group = G_LAY, display = display.none)
-gapSess   = input.int(22, "Session Panel Right Spacer (spaces)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Session Panel so it clears the Win Rate table. Increase if the two overlap.", display = display.none)
-gapTrend  = input.int(62, "Trend Meter Right Spacer (spaces)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Trend Meter so it clears BOTH tables to its right. Increase if they overlap.", display = display.none)
+gapSess   = input.int(26, "Session Panel Right Spacer (characters)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Session Panel so it clears the Win Rate table. Increase if the two overlap.", display = display.none)
+gapTrend  = input.int(70, "Trend Meter Right Spacer (characters)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Trend Meter so it clears BOTH tables to its right. Increase if they overlap.", display = display.none)
 
 // =============================================================================
 //  STYLE HELPERS - turn the text choices above into real Pine constants
@@ -792,7 +792,12 @@ bool ovLuOk = ovLuEn > ovLuSt
 //      [ TREND METER ] [ SESSIONS ] [ WIN RATE |chart edge ]
 //  The Win Rate table is flush right. The other two each carry one empty, fully
 //  transparent spacer column on their RIGHT, which pushes their content left.
-//  Widen the spacers under "11 - Dashboard Layout" if anything ever overlaps.
+//  The spacer cell is filled with repeated "0" characters painted in a fully
+//  transparent colour, NOT with spaces: TradingView trims a cell whose text is
+//  only whitespace, which collapses the column to zero width and lets the
+//  tables stack on top of each other. The glyphs are invisible; only their
+//  width survives. Widen the spacers under "11 - Dashboard Layout" if anything
+//  ever overlaps, narrow them if a panel is pushed off the left of the chart.
 // =============================================================================
 f_trendCell(int sc) =>
     sc == 1 ? trUpCol : sc == -1 ? trDnCol : trNeCol
@@ -807,7 +812,7 @@ var table tWin   = table.new(position.top_right, 2, 9, bgcolor = transparent, bo
 if barstate.islast
     // ---------------- TREND METER (left-most) ----------------
     if showTrend
-        table.cell(tTrend, 2, 0, gapTrend > 0 ? str.repeat(" ", gapTrend) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
+        table.cell(tTrend, 2, 0, gapTrend > 0 ? str.repeat("0", gapTrend) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
         table.cell(tTrend, 0, 0, "TREND METER", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tTrend, 1, 0, "EMA " + str.tostring(emaL1) + "/" + str.tostring(emaL2) + "/" + str.tostring(emaL3) + "/" + str.tostring(emaL4), bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tTrend, 0, 1, tfA, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
@@ -823,7 +828,7 @@ if barstate.islast
 
     // ---------------- SESSION PANEL (middle) ----------------
     if showSess
-        table.cell(tSess, 4, 0, gapSess > 0 ? str.repeat(" ", gapSess) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
+        table.cell(tSess, 4, 0, gapSess > 0 ? str.repeat("0", gapSess) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
         table.cell(tSess, 0, 0, "SESSION", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tSess, 1, 0, "TIME (" + sessTz + ")", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tSess, 2, 0, "PROGRESS", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
