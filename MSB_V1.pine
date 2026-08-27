@@ -78,6 +78,7 @@ G_LAY = "11 - Dashboard Layout"
 // -----------------------------------------------------------------------------
 zigzagLen  = input.int(9, "ZigZag Length", minval = 2, maxval = 100, group = G_STR, tooltip = "How many bars define a swing. Higher = fewer, bigger swings. Original default 9.", display = display.none)
 fibFactor  = input.float(0.33, "Fib Factor For Breakout Confirmation", minval = 0.0, maxval = 1.0, step = 0.01, group = G_STR, tooltip = "How far past the old swing price must push before the break counts. 0.33 = a third of the previous leg. 0 = any break counts.", display = display.none)
+breakTrigger = input.string("Price Breaks The Level", "Break Trigger", options = ["Price Breaks The Level", "Pivot Comparison (original)"], group = G_STR, tooltip = "Price Breaks The Level (default): the signal fires on the candle that actually CLOSES beyond the last swing level - the breakout bar out of the zone.\nPivot Comparison (original): the EmreKb behaviour, which compares one swing pivot against the previous one. A pivot is only recorded once price has already reversed away from it, so the signal lands roughly a ZigZag Length AFTER the turn - a BUY at the top, a SELL at the bottom. Kept so the two can be compared.", display = display.none)
 showZigzag = input.bool(true, "Show ZigZag Legs", group = G_STR, display = display.none)
 zzCol      = input.color(color.gray, "ZigZag Line Colour", group = G_STR, display = display.none)
 showMSB    = input.bool(true, "Show MSB Break Lines & Labels", group = G_STR, display = display.none)
@@ -397,12 +398,39 @@ if trendFlip and showZigzag and not na(h0i) and not na(l0i)
 var int   market = 1
 var float usedL  = na
 var float usedH  = na
+var float usedBullLvl = na
+var float usedBearLvl = na
 
-bool structReady = array.size(hiVal) >= 2 and array.size(loVal) >= 2
+bool priceMode = breakTrigger == "Price Breaks The Level"
+
+// PIVOT COMPARISON (original): one swing pivot measured against the previous
+// one. Note there is no reference to price here at all. A pivot is only pushed
+// into the array when the ZigZag flips, and the ZigZag only flips once price
+// has already travelled back the other way - so this test cannot become true
+// until the move is over. That is what puts the BUY at the top of the rally
+// and the SELL at the bottom of the drop.
+bool bullPivot = not na(h0) and not na(h1) and not na(l0) and h0 > h1 and h0 > h1 + math.abs(h1 - l0) * fibFactor
+bool bearPivot = not na(l0) and not na(l1) and not na(h0) and l0 < l1 and l0 < l1 - math.abs(h0 - l1) * fibFactor
+
+// PRICE BREAK: the bar itself has to close beyond the last swing level and
+// push past it by the Fib Factor margin. This fires ON the breakout candle -
+// the candle that closes out of the zone - which is what a structure break
+// looks like to the eye.
+bool bullPrice = not na(h0) and not na(l0) and close > h0 and high > h0 + math.abs(h0 - l0) * fibFactor
+bool bearPrice = not na(l0) and not na(h0) and close < l0 and low  < l0 - math.abs(h0 - l0) * fibFactor
+
+// Price mode needs only the current pair of pivots; pivot mode needs the
+// previous pair too.
+bool structReady = priceMode ? (array.size(hiVal) >= 1 and array.size(loVal) >= 1) : (array.size(hiVal) >= 2 and array.size(loVal) >= 2)
 bool sameAsLast  = (not na(usedL) and usedL == l0) or (not na(usedH) and usedH == h0)
 
-bool bearBreak = structReady and not sameAsLast and market == 1 and not na(l0) and not na(l1) and not na(h0) and l0 < l1 and l0 < l1 - math.abs(h0 - l1) * fibFactor
-bool bullBreak = structReady and not sameAsLast and market == -1 and not na(h0) and not na(h1) and not na(l0) and h0 > h1 and h0 > h1 + math.abs(h1 - l0) * fibFactor
+// One signal per level: a level that has already produced a break cannot
+// produce another until a fresh pivot replaces it.
+bool okBull = priceMode ? (na(usedBullLvl) or h0 != usedBullLvl) : not sameAsLast
+bool okBear = priceMode ? (na(usedBearLvl) or l0 != usedBearLvl) : not sameAsLast
+
+bool bullBreak = structReady and market == -1 and okBull and (priceMode ? bullPrice : bullPivot)
+bool bearBreak = structReady and market == 1  and okBear and (priceMode ? bearPrice : bearPivot)
 
 int upCount = (trA == 1 ? 1 : 0) + (trB == 1 ? 1 : 0) + (trC == 1 ? 1 : 0) + (trD2 == 1 ? 1 : 0)
 int dnCount = (trA == -1 ? 1 : 0) + (trB == -1 ? 1 : 0) + (trC == -1 ? 1 : 0) + (trD2 == -1 ? 1 : 0)
@@ -417,20 +445,27 @@ if confirmed
         market := 1
         usedL  := l0
         usedH  := h0
+        usedBullLvl := h0
         buySignal := true
     else if bearBreak and trendOkSell
         market := -1
         usedL  := l0
         usedH  := h0
+        usedBearLvl := l0
         sellSignal := true
 
-if showMSB and buySignal and not na(h1i) and not na(h1)
-    line.new(h1i, h1, bar_index, h1, color = msbUpCol, width = 2)
-    label.new(int(math.avg(h1i, bar_index)), h1, "MSB", color = transparent, style = label.style_label_down, textcolor = msbUpCol, size = size.small)
+float msbUpLvl = priceMode ? h0 : h1
+int   msbUpIdx = priceMode ? h0i : h1i
+float msbDnLvl = priceMode ? l0 : l1
+int   msbDnIdx = priceMode ? l0i : l1i
 
-if showMSB and sellSignal and not na(l1i) and not na(l1)
-    line.new(l1i, l1, bar_index, l1, color = msbDnCol, width = 2)
-    label.new(int(math.avg(l1i, bar_index)), l1, "MSB", color = transparent, style = label.style_label_up, textcolor = msbDnCol, size = size.small)
+if showMSB and buySignal and not na(msbUpIdx) and not na(msbUpLvl)
+    line.new(msbUpIdx, msbUpLvl, bar_index, msbUpLvl, color = msbUpCol, width = 2)
+    label.new(int(math.avg(msbUpIdx, bar_index)), msbUpLvl, "MSB", color = transparent, style = label.style_label_down, textcolor = msbUpCol, size = size.small)
+
+if showMSB and sellSignal and not na(msbDnIdx) and not na(msbDnLvl)
+    line.new(msbDnIdx, msbDnLvl, bar_index, msbDnLvl, color = msbDnCol, width = 2)
+    label.new(int(math.avg(msbDnIdx, bar_index)), msbDnLvl, "MSB", color = transparent, style = label.style_label_up, textcolor = msbDnCol, size = size.small)
 
 // =============================================================================
 //  DISTANCE ENGINES - Pip / ATR / Percentage
