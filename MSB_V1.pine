@@ -63,6 +63,8 @@ G_DIS = "4 - Distance Method (SL / TP)"
 G_PIP = "4a - Pip Settings"
 G_ATR = "4b - ATR Settings"
 G_PCT = "4c - Percentage Settings"
+G_ENT = "4d - Entry Model"
+G_STC = "4e - Structure SL Settings"
 G_MRK = "5 - Marker Style"
 G_LIN = "6 - Line & Label Style"
 G_ALR = "7 - Alerts (TVMT)"
@@ -111,7 +113,7 @@ beBbTxt     = input.color(color.red, "Bearish BB / MB Text", group = G_OB, displ
 //  4. DISTANCE METHOD  (Pip / ATR / Percentage - the trader picks one)
 //     Whichever is selected applies to SL, TP1, TP2 and TP3 together.
 // -----------------------------------------------------------------------------
-distMethod = input.string("Pip", "Distance Method", options = ["Pip", "ATR", "Percentage"], group = G_DIS, tooltip = "All three engines are built in. Switch anytime - every level follows the choice.", display = display.none)
+distMethod = input.string("Structure", "Distance Method", options = ["Pip", "ATR", "Percentage", "Structure"], group = G_DIS, tooltip = "Structure (recommended): the stop goes just beyond the swing the break came from, and TP1/2/3 are multiples of THAT risk. The stop is then sized by the move, not by a fixed number - a fixed 100 pips on 1-minute gold is roughly one bar of noise, which is why it gets hit so often.\nPip / ATR / Percentage: fixed distances, all three engines still built in.", display = display.none)
 
 // --- 4a. PIP ENGINE ---------------------------------------------------------
 //  1 pip = 10 points, and 1 point = syminfo.mintick (the smallest price step).
@@ -142,6 +144,24 @@ slPct  = input.float(0.50, "Stop Loss (%)", minval = 0.0, step = 0.05, group = G
 tp1Pct = input.float(0.50, "Take Profit 1 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
 tp2Pct = input.float(1.00, "Take Profit 2 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
 tp3Pct = input.float(1.50, "Take Profit 3 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+
+// --- 4d. ENTRY MODEL --------------------------------------------------------
+//  WHERE the trade is taken. Entering at the close of the break candle means
+//  buying the top of the thrust that just broke structure, so a tight stop sits
+//  right inside the pullback that normally follows. The order block this script
+//  already draws is the level the move came FROM - waiting for price to come
+//  back to it puts entry much closer to invalidation, which is what actually
+//  moves reward:risk rather than just re-labelling it.
+// -----------------------------------------------------------------------------
+entryModel  = input.string("Break Close", "Entry Model", options = ["Break Close", "Order Block Retest", "Fib Retracement"], group = G_ENT, tooltip = "Break Close: entry at the close of the break bar. Fires immediately - this is what a market order does.\nOrder Block Retest (recommended): entry is a LIMIT at the edge of the order block. The trade only counts once price comes back and touches it.\nFib Retracement: entry is a LIMIT at a set pullback percentage of the break leg.\nWith either limit model the webhook still fires on the break bar, so your TVMT bridge must place a PENDING order at the entry price, not a market order.", display = display.none)
+retFib      = input.float(50.0, "Fib Retracement Entry (% of the break leg)", minval = 1.0, maxval = 99.0, step = 1.0, group = G_ENT, tooltip = "Only used by the Fib Retracement model. 50 = halfway back down the leg that broke structure.", display = display.none)
+pendingBars = input.int(30, "Cancel An Unfilled Entry After (bars)", minval = 1, maxval = 500, group = G_ENT, tooltip = "A limit entry that never gets touched is cancelled after this many bars and scored as Expired, not as a loss.", display = display.none)
+
+// --- 4e. STRUCTURE SL SETTINGS ----------------------------------------------
+slBuffPips = input.float(20.0, "Structure SL Buffer (pips beyond the swing)", minval = 0.0, step = 1.0, group = G_STC, tooltip = "How far past the swing the stop sits, so a wick through the level does not take you out.", display = display.none)
+tp1R       = input.float(1.0, "Take Profit 1 (R)", minval = 0.1, step = 0.1, group = G_STC, tooltip = "R = the distance from entry to stop. 2R means the target is twice the risk.", display = display.none)
+tp2R       = input.float(2.0, "Take Profit 2 (R)", minval = 0.1, step = 0.1, group = G_STC, display = display.none)
+tp3R       = input.float(3.0, "Take Profit 3 (R)", minval = 0.1, step = 0.1, group = G_STC, display = display.none)
 
 // -----------------------------------------------------------------------------
 //  5. MARKER STYLE  (shape AND colour are trader-selectable inputs)
@@ -422,30 +442,86 @@ f_dist(string dMethod, float pipsVal, float atrMult, float pctVal, float entryP)
     float d = dMethod == "Pip" ? pipsVal * pipPrice : dMethod == "ATR" ? nz(atrVal) * atrMult : entryP * pctVal / 100.0
     d
 
+// Returns the bars-back offset of the LAST candle of the wanted direction
+// inside the range, or na when the range is unusable / nothing matches.
+f_findBlock(int fromIdx, int toIdx, bool wantDown) =>
+    int res = na
+    int b = na(toIdx) ? na : math.min(toIdx, bar_index)
+    int a = na(fromIdx) or na(b) ? na : math.max(math.max(math.min(fromIdx, b), b - 300), bar_index - 4000)
+    if not na(a) and not na(b) and a <= b
+        for i = a to b
+            int off = bar_index - i
+            if off >= 0 and off <= 4000
+                bool isDown = open[off] > close[off]
+                if (wantDown and isDown) or (not wantDown and not isDown)
+                    res := off
+    res
+
 // =============================================================================
 //  LEVEL CAPTURE  (only on a CONFIRMED break bar)
 // =============================================================================
-var float pEntry = na
-var float pSL    = na
-var float pTP1   = na
-var float pTP2   = na
-var float pTP3   = na
-var int   pDir   = 0
-
 bool newSetup = buySignal or sellSignal
 
+// The order block is the last opposite-direction candle of the leg that broke
+// structure. Found once here, then reused by both the entry model and the
+// zone boxes further down, so the drawn box and the entry always agree.
+int obOffBuy  = buySignal  and not na(h1i) and not na(l0i) ? f_findBlock(h1i, l0i, true)  : na
+int obOffSell = sellSignal and not na(l1i) and not na(h0i) ? f_findBlock(l1i, h0i, false) : na
+
+var float pEntry   = na
+var float pSL      = na
+var float pTP1     = na
+var float pTP2     = na
+var float pTP3     = na
+var int   pDir     = 0
+var bool  pPending = false
+var int   pSigBar  = 0
+
 if newSetup
-    float e   = close
-    float dSL = f_dist(distMethod, slPips,  slAtr,  slPct,  e)
-    float d1  = f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, e)
-    float d2  = f_dist(distMethod, tp2Pips, tp2Atr, tp2Pct, e)
-    float d3  = f_dist(distMethod, tp3Pips, tp3Atr, tp3Pct, e)
-    pDir   := buySignal ? 1 : -1
-    pEntry := e
-    pSL    := buySignal ? e - dSL : e + dSL
-    pTP1   := buySignal ? e + d1  : e - d1
-    pTP2   := buySignal ? e + d2  : e - d2
-    pTP3   := buySignal ? e + d3  : e - d3
+    bool  isBuy    = buySignal
+    float brkClose = close
+    float e        = brkClose
+
+    // ---- WHERE the trade is taken -------------------------------------
+    if entryModel == "Order Block Retest"
+        int ob = isBuy ? obOffBuy : obOffSell
+        if not na(ob)
+            e := isBuy ? high[ob] : low[ob]
+    else if entryModel == "Fib Retracement"
+        float anchor = isBuy ? l0 : h0
+        if not na(anchor)
+            e := brkClose + (anchor - brkClose) * retFib / 100.0
+
+    // A retest entry must sit on the PULLBACK side of the break close. If the
+    // block sits the wrong side, fall back to the break close rather than
+    // inventing a level price never traded back to.
+    if isBuy and e > brkClose
+        e := brkClose
+    if not isBuy and e < brkClose
+        e := brkClose
+
+    // ---- HOW FAR the stop sits ----------------------------------------
+    float dSL = 0.0
+    if distMethod == "Structure"
+        float swing = nz(isBuy ? l0 : h0, brkClose)
+        float buff  = slBuffPips * pipPrice
+        dSL := isBuy ? e - (swing - buff) : (swing + buff) - e
+    else
+        dSL := f_dist(distMethod, slPips, slAtr, slPct, e)
+    dSL := math.max(dSL, pipPrice)
+
+    float d1 = distMethod == "Structure" ? dSL * tp1R : f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, e)
+    float d2 = distMethod == "Structure" ? dSL * tp2R : f_dist(distMethod, tp2Pips, tp2Atr, tp2Pct, e)
+    float d3 = distMethod == "Structure" ? dSL * tp3R : f_dist(distMethod, tp3Pips, tp3Atr, tp3Pct, e)
+
+    pDir     := isBuy ? 1 : -1
+    pEntry   := e
+    pSL      := isBuy ? e - dSL : e + dSL
+    pTP1     := isBuy ? e + d1  : e - d1
+    pTP2     := isBuy ? e + d2  : e - d2
+    pTP3     := isBuy ? e + d3  : e - d3
+    pPending := entryModel != "Break Close" and e != brkClose
+    pSigBar  := bar_index
 
 // =============================================================================
 //  MARKERS
@@ -532,21 +608,6 @@ var array<box> beObArr = array.new<box>()
 var array<box> buBbArr = array.new<box>()
 var array<box> beBbArr = array.new<box>()
 
-// Returns the bars-back offset of the LAST candle of the wanted direction
-// inside the range, or na when the range is unusable / nothing matches.
-f_findBlock(int fromIdx, int toIdx, bool wantDown) =>
-    int res = na
-    int b = na(toIdx) ? na : math.min(toIdx, bar_index)
-    int a = na(fromIdx) or na(b) ? na : math.max(math.max(math.min(fromIdx, b), b - 300), bar_index - 4000)
-    if not na(a) and not na(b) and a <= b
-        for i = a to b
-            int off = bar_index - i
-            if off >= 0 and off <= 4000
-                bool isDown = open[off] > close[off]
-                if (wantDown and isDown) or (not wantDown and not isDown)
-                    res := off
-    res
-
 f_pushZone(array<box> arr, box nb) =>
     array.push(arr, nb)
     while array.size(arr) > maxZones
@@ -577,7 +638,7 @@ f_manageZones(array<box> arr, bool bullish) =>
 
 if showBoxes and buySignal
     // Bullish OB  = the last DOWN candle of the leg that ran from h1 to l0.
-    int obOff = f_findBlock(h1i, l0i, true)
+    int obOff = obOffBuy
     if not na(obOff)
         f_pushZone(buObArr, box.new(bar_index - obOff, high[obOff], x2, low[obOff], bgcolor = buObCol, border_color = buObBrd, text = "Bu-OB", text_color = buObTxt, text_halign = text.align_right, text_size = boxTxtSize))
     // Bullish breaker / mitigation block = the last UP candle from l1 back to h1.
@@ -587,7 +648,7 @@ if showBoxes and buySignal
 
 if showBoxes and sellSignal
     // Bearish OB = the last UP candle of the leg that ran from l1 to h0.
-    int obOffS = f_findBlock(l1i, h0i, false)
+    int obOffS = obOffSell
     if not na(obOffS)
         f_pushZone(beObArr, box.new(bar_index - obOffS, high[obOffS], x2, low[obOffS], bgcolor = beObCol, border_color = beObBrd, text = "Be-OB", text_color = beObTxt, text_halign = text.align_right, text_size = boxTxtSize))
     // Bearish breaker / mitigation block = the last DOWN candle from h1 back to l1.
@@ -672,79 +733,118 @@ if alertMode == "One alert (alert function)"
 //  Everything recalculates automatically when any input or the timeframe changes,
 //  because the levels it scores are the indicator's own captured levels.
 // =============================================================================
-var int   vDir  = 0
-var float vE    = na
-var float vS    = na
-var float v1    = na
-var float v2    = na
-var float v3    = na
-var bool  vDone = false
-var bool  vWin  = false
-var bool  v2Hit = false
-var bool  v3Hit = false
+var int   vState = 0        // 0 = flat, 1 = pending limit, 2 = live trade
+var int   vDir   = 0
+var float vE     = na
+var float vS     = na
+var float v1     = na
+var float v2     = na
+var float v3     = na
+var int   vBar   = 0
+var bool  vDone  = false
+var bool  vWin   = false
+var bool  v2Hit  = false
+var bool  v3Hit  = false
 
-var int cRes  = 0
-var int cWin  = 0
-var int cLoss = 0
-var int cSL   = 0
-var int c1    = 0
-var int c2    = 0
-var int c3    = 0
+var int   cSignals = 0
+var int   cFilled  = 0
+var int   cExpired = 0
+var int   cRes     = 0
+var int   cWin     = 0
+var int   cLoss    = 0
+var int   cSL      = 0
+var int   c1       = 0
+var int   c2       = 0
+var int   c3       = 0
+var float sumR     = 0.0
 
-if confirmed and vDir != 0
-    bool slHit = vDir == 1 ? low <= vS : high >= vS
-    bool t1Hit = vDir == 1 ? high >= v1 : low <= v1
-    bool t2Hit = vDir == 1 ? high >= v2 : low <= v2
-    bool t3Hit = vDir == 1 ? high >= v3 : low <= v3
-    bool slFirst = slHit and t1Hit ? math.abs(open - vS) <= math.abs(open - v1) : slHit
-    if not vDone
-        if slHit and not (t1Hit and not slFirst)
-            cRes  += 1
-            cLoss += 1
-            cSL   += 1
-            vDone := true
-            vWin  := false
-            vDir  := 0
-        else if t1Hit
-            cRes += 1
-            cWin += 1
-            c1   += 1
-            vDone := true
-            vWin  := true
-    if vDir != 0 and vDone and vWin
-        if t2Hit and not v2Hit
-            v2Hit := true
-            c2 += 1
-        if t3Hit and not v3Hit
-            v3Hit := true
-            c3 += 1
-        if t3Hit or slHit
-            vDir := 0
+if confirmed and vState != 0
+    // ---- PENDING: did the limit fill, or did it expire? ----------------
+    if vState == 1
+        bool filled = vDir == 1 ? low <= vE : high >= vE
+        bool blown  = vDir == 1 ? low <= vS : high >= vS
+        if filled
+            vState  := 2
+            cFilled += 1
+        else if blown or (bar_index - vBar) >= pendingBars
+            vState   := 0
+            cExpired += 1
 
-var int cSignals = 0
+    // ---- LIVE: score the trade against SL / TP -------------------------
+    // Runs on the fill bar too, so a bar that sweeps through entry AND stop
+    // is counted as the loss it would have been, never as a free fill.
+    if vState == 2
+        bool slHit = vDir == 1 ? low <= vS : high >= vS
+        bool t1Hit = vDir == 1 ? high >= v1 : low <= v1
+        bool t2Hit = vDir == 1 ? high >= v2 : low <= v2
+        bool t3Hit = vDir == 1 ? high >= v3 : low <= v3
+        bool slFirst = slHit and t1Hit ? math.abs(open - vS) <= math.abs(open - v1) : slHit
+        float risk = math.max(math.abs(vE - vS), pipPrice)
+        if not vDone
+            if slHit and not (t1Hit and not slFirst)
+                cRes  += 1
+                cLoss += 1
+                cSL   += 1
+                sumR  -= 1.0
+                vDone  := true
+                vWin   := false
+                vState := 0
+            else if t1Hit
+                cRes += 1
+                cWin += 1
+                c1   += 1
+                sumR += math.abs(v1 - vE) / risk
+                vDone := true
+                vWin  := true
+        if vState == 2 and vDone and vWin
+            if t2Hit and not v2Hit
+                v2Hit := true
+                c2 += 1
+            if t3Hit and not v3Hit
+                v3Hit := true
+                c3 += 1
+            if t3Hit or slHit
+                vState := 0
+
 if newSetup
+    if vState == 1
+        cExpired += 1          // an unfilled limit cancelled by the next signal
     cSignals += 1
+    vDir   := pDir
+    vE     := pEntry
+    vS     := pSL
+    v1     := pTP1
+    v2     := pTP2
+    v3     := pTP3
+    vBar   := bar_index
+    vDone  := false
+    vWin   := false
+    v2Hit  := false
+    v3Hit  := false
+    vState := pPending ? 1 : 2
+    if not pPending
+        cFilled += 1
 
-if newSetup
-    vDir  := pDir
-    vE    := pEntry
-    vS    := pSL
-    v1    := pTP1
-    v2    := pTP2
-    v3    := pTP3
-    vDone := false
-    vWin  := false
-    v2Hit := false
-    v3Hit := false
-
+// ---- HEADLINE NUMBERS ------------------------------------------------
+// Win rate on its own says nothing: at 1:3 a 25% win rate is exactly break
+// even, at 1:1 it takes 50%. Expectancy in R is the number that decides
+// whether the entry has an edge, so it is reported next to the break-even
+// win rate the current SL/TP settings actually require.
 float winRate = cRes > 0 ? 100.0 * cWin / cRes : na
 float pctSL   = cRes > 0 ? 100.0 * cSL  / cRes : na
 float pct1    = cRes > 0 ? 100.0 * c1   / cRes : na
 float pct2    = cRes > 0 ? 100.0 * c2   / cRes : na
 float pct3    = cRes > 0 ? 100.0 * c3   / cRes : na
+float expR    = cRes > 0 ? sumR / cRes : na
+float rrNow   = na(pEntry) or na(pSL) or na(pTP1) ? na : math.abs(pTP1 - pEntry) / math.max(math.abs(pEntry - pSL), pipPrice)
+float beWR    = na(rrNow) ? na : 100.0 / (1.0 + rrNow)
+float fillPct = cSignals > 0 ? 100.0 * cFilled / cSignals : na
+
+f_rTxt(float v) =>
+    na(v) ? "-" : (v >= 0 ? "+" : "") + str.tostring(v, "0.00") + "R"
 
 f_pctTxt(float v) =>
-    na(v) ? "-" : str.tostring(v, "#.0") + "%"
+    na(v) ? "-" : str.tostring(v, "0.0") + "%"
 
 // =============================================================================
 //  SESSION HELPERS
@@ -838,7 +938,7 @@ color  filtBg  = minAligned == 0 ? trNeCol : filtBlocking ? trDnCol : trUpCol
 
 var table tTrend = table.new(f_pos(posTrend), 3, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
 var table tSess  = table.new(f_pos(posSess),  5, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
-var table tWin   = table.new(f_pos(posWin),   2, 10, bgcolor = transparent, border_width = 0, frame_width = 0)
+var table tWin   = table.new(f_pos(posWin),   2, 15, bgcolor = transparent, border_width = 0, frame_width = 0)
 
 if barstate.islast
     // ---------------- TREND METER (left-most) ----------------
@@ -903,19 +1003,29 @@ if barstate.islast
         table.cell(tWin, 1, 0, distMethod, bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tWin, 0, 1, "Signals", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tWin, 1, 1, str.tostring(cSignals), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 2, "Resolved", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 2, str.tostring(cRes), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 3, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 3, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 4, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 4, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 5, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 5, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= 50 ? winCol : lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 6, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 6, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 7, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 7, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 8, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 8, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 9, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 9, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 2, "Filled", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 2, str.tostring(cFilled) + " (" + f_pctTxt(fillPct) + ")", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 3, "Expired", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 3, str.tostring(cExpired), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 4, "Resolved", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 4, str.tostring(cRes), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 5, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 5, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 6, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 6, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 7, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 7, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= nz(beWR, 100) ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 8, "Break-even WR", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 8, f_pctTxt(beWR), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 9, "Expectancy / trade", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 9, f_rTxt(expR), bgcolor = dashHdrBg, text_color = nz(expR, -1) > 0 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 10, "Total R", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 10, f_rTxt(sumR), bgcolor = dashHdrBg, text_color = sumR > 0 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 11, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 11, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 12, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 12, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 13, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 13, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 14, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 14, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
