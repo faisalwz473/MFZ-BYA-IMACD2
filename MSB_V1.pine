@@ -1,0 +1,881 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//
+// ORIGINAL WORK:  "Market Structure Break & Order Block" (MSB-OB)  (c) EmreKb  - MPL-2.0
+// THIS FILE:      "MSB V1" - a modified derivative of that work, also released under MPL-2.0.
+//
+// =============================================================================
+//  MSB V1
+// -----------------------------------------------------------------------------
+//  WHAT IT DOES, IN PLAIN ENGLISH
+//
+//   1. ZIGZAG           A swing high is the highest high of the last N bars, a
+//                       swing low is the lowest low of the last N bars. Each
+//                       time the swing direction flips we store that pivot.
+//   2. MARKET STRUCTURE The last two swing highs (h0, h1) and the last two swing
+//                       lows (l0, l1) are compared. When the newest low breaks
+//                       BELOW the previous low by more than "Fib Factor" of the
+//                       leg, structure is broken DOWN  -> SELL.
+//                       When the newest high breaks ABOVE the previous high by
+//                       the same margin, structure is broken UP -> BUY.
+//                       Because a break can only happen against the current
+//                       market state, signals always alternate BUY, SELL, BUY...
+//   3. NO REPAINT       Every state change is gated behind barstate.isconfirmed,
+//                       so nothing is decided until the bar has CLOSED. A marker
+//                       that has printed can never disappear.
+//   4. LEVELS           On the confirmed break bar we capture Entry (that bar's
+//                       close), Stop Loss, TP1, TP2 and TP3 using whichever
+//                       Distance Method the trader picked (Pip / ATR / Percent).
+//   5. DRAW             Only the LATEST setup is drawn. The previous lines and
+//                       labels are deleted first. Lines extend to the right and
+//                       labels are re-anchored to the live edge every bar, so
+//                       they can never scroll off screen.
+//   6. ALERT            Five hidden plots (titles: entry, sl, tp, tp2, tp3) feed
+//                       the {{plot("title")}} placeholders, and the alert message
+//                       is pure JSON in the exact shape the TVMT bridge expects.
+//
+//  ALERT SETUP (do this once in TradingView)
+//   Right-click chart -> Add alert -> Condition: "MSB V1"
+//     -> choose "MSB BUY (TVMT)" or "MSB SELL (TVMT)"
+//     -> Trigger: "Once Per Bar Close"
+//     -> The Message box is pre-filled with the JSON. Do NOT edit it.
+//     -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
+//   Create BOTH alerts with IDENTICAL indicator settings.
+//
+//   Alternative, safer route: set "Alert Method" to "One alert (alert function)"
+//   and create a single alert on Condition "MSB V1" -> "Any alert() function
+//   call". The script then writes the JSON itself, so exactly one message is
+//   sent per signal and its "action" always matches the marker on the chart.
+// =============================================================================
+
+//@version=6
+indicator("MSB V1", "MSB V1", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 4900)
+
+// =============================================================================
+//  INPUT GROUPS
+//  NOTE: every input below uses display = display.none. That keeps the chart
+//  status line showing ONLY the indicator name, while the inputs still appear
+//  normally under Settings -> Inputs.
+// =============================================================================
+G_STR = "1 - Market Structure Engine"
+G_FIL = "2 - Signal Filter"
+G_OB  = "3 - Order Blocks & Breaker Blocks"
+G_DIS = "4 - Distance Method (SL / TP)"
+G_PIP = "4a - Pip Settings"
+G_ATR = "4b - ATR Settings"
+G_PCT = "4c - Percentage Settings"
+G_MRK = "5 - Marker Style"
+G_LIN = "6 - Line & Label Style"
+G_ALR = "7 - Alerts (TVMT)"
+G_TRD = "8 - Trend Meter Dashboard"
+G_SES = "9 - Session Panel"
+G_WIN = "10 - Win Rate Dashboard"
+G_LAY = "11 - Dashboard Layout"
+
+// -----------------------------------------------------------------------------
+//  1. MARKET STRUCTURE ENGINE
+// -----------------------------------------------------------------------------
+zigzagLen  = input.int(9, "ZigZag Length", minval = 2, maxval = 100, group = G_STR, tooltip = "How many bars define a swing. Higher = fewer, bigger swings. Original default 9.", display = display.none)
+fibFactor  = input.float(0.33, "Fib Factor For Breakout Confirmation", minval = 0.0, maxval = 1.0, step = 0.01, group = G_STR, tooltip = "How far past the old swing price must push before the break counts. 0.33 = a third of the previous leg. 0 = any break counts.", display = display.none)
+showZigzag = input.bool(true, "Show ZigZag Legs", group = G_STR, display = display.none)
+zzCol      = input.color(color.gray, "ZigZag Line Colour", group = G_STR, display = display.none)
+showMSB    = input.bool(true, "Show MSB Break Lines & Labels", group = G_STR, display = display.none)
+msbUpCol   = input.color(color.green, "Bullish MSB Colour", group = G_STR, display = display.none)
+msbDnCol   = input.color(color.red, "Bearish MSB Colour", group = G_STR, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  2. SIGNAL FILTER (optional, OFF by default so signals are unchanged)
+// -----------------------------------------------------------------------------
+useTrendFilter = input.bool(false, "Only Take Signals Aligned With The Trend Meter", group = G_FIL, tooltip = "OFF by default. When ON, a BUY is only accepted while all four Trend Meter timeframes are up, and a SELL only while all four are down. A blocked break is not thrown away - it can still fire on a later bar once alignment appears.", display = display.none)
+
+// -----------------------------------------------------------------------------
+//  3. ORDER BLOCK / BREAKER BLOCK ZONES (from the original indicator)
+// -----------------------------------------------------------------------------
+showBoxes   = input.bool(true, "Show Order Block / Breaker Zones", group = G_OB, display = display.none)
+deleteBoxes = input.bool(true, "Delete Old / Broken Zones", group = G_OB, display = display.none)
+maxZones    = input.int(5, "Max Zones Kept Per Type", minval = 1, maxval = 20, group = G_OB, display = display.none)
+boxTxtSize  = input.string(size.tiny, "Zone Text Size", options = [size.tiny, size.small, size.normal, size.large, size.huge], group = G_OB, display = display.none)
+buObCol     = input.color(color.new(color.green, 70), "Bullish OB Fill", group = G_OB, display = display.none)
+buObBrd     = input.color(color.green, "Bullish OB Border", group = G_OB, display = display.none)
+buObTxt     = input.color(color.green, "Bullish OB Text", group = G_OB, display = display.none)
+beObCol     = input.color(color.new(color.red, 70), "Bearish OB Fill", group = G_OB, display = display.none)
+beObBrd     = input.color(color.red, "Bearish OB Border", group = G_OB, display = display.none)
+beObTxt     = input.color(color.red, "Bearish OB Text", group = G_OB, display = display.none)
+buBbCol     = input.color(color.new(color.green, 70), "Bullish BB / MB Fill", group = G_OB, display = display.none)
+buBbBrd     = input.color(color.green, "Bullish BB / MB Border", group = G_OB, display = display.none)
+buBbTxt     = input.color(color.green, "Bullish BB / MB Text", group = G_OB, display = display.none)
+beBbCol     = input.color(color.new(color.red, 70), "Bearish BB / MB Fill", group = G_OB, display = display.none)
+beBbBrd     = input.color(color.red, "Bearish BB / MB Border", group = G_OB, display = display.none)
+beBbTxt     = input.color(color.red, "Bearish BB / MB Text", group = G_OB, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  4. DISTANCE METHOD  (Pip / ATR / Percentage - the trader picks one)
+//     Whichever is selected applies to SL, TP1, TP2 and TP3 together.
+// -----------------------------------------------------------------------------
+distMethod = input.string("Pip", "Distance Method", options = ["Pip", "ATR", "Percentage"], group = G_DIS, tooltip = "All three engines are built in. Switch anytime - every level follows the choice.", display = display.none)
+
+// --- 4a. PIP ENGINE ---------------------------------------------------------
+//  1 pip = 10 points, and 1 point = syminfo.mintick (the smallest price step).
+//    XAUUSD 2-decimal feed  : mintick 0.01    -> pip 0.10
+//    XAUUSD 3-decimal feed  : mintick 0.001   -> pip 0.01
+//    5-digit forex          : mintick 0.00001 -> pip 0.0001
+//    3-digit JPY forex      : mintick 0.001   -> pip 0.01
+//  The raw tick is NEVER used as the pip.
+//  GOLD CHECK: on a 2-decimal feed 150 pips = 150 * 0.10 = 15.00 in price
+//  (1500 points), and 150 POINTS = 1.50 in price = 15 pips. A 3-decimal feed
+//  is exactly the same, one decimal smaller.
+pipMode   = input.string("Auto (10 x mintick)", "Pip Size Mode", options = ["Auto (10 x mintick)", "Manual"], group = G_PIP, tooltip = "Auto covers gold, 5-digit forex and 3-digit JPY. Use Manual only if your broker quotes differently.", display = display.none)
+manualPip = input.float(0.10, "Manual Pip Size (price units)", minval = 0.0, step = 0.00001, group = G_PIP, tooltip = "Example: 0.10 for a 2-decimal XAUUSD feed, 0.0001 for 5-digit forex.", display = display.none)
+slPips    = input.float(150.0, "Stop Loss (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+tp1Pips   = input.float(150.0, "Take Profit 1 (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+tp2Pips   = input.float(300.0, "Take Profit 2 (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+tp3Pips   = input.float(450.0, "Take Profit 3 (pips)", minval = 0.0, step = 1.0, group = G_PIP, display = display.none)
+
+// --- 4b. ATR ENGINE ---------------------------------------------------------
+atrLen = input.int(14, "ATR Length", minval = 1, group = G_ATR, display = display.none)
+slAtr  = input.float(1.5, "Stop Loss (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+tp1Atr = input.float(1.5, "Take Profit 1 (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+tp2Atr = input.float(3.0, "Take Profit 2 (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+tp3Atr = input.float(4.5, "Take Profit 3 (x ATR)", minval = 0.0, step = 0.1, group = G_ATR, display = display.none)
+
+// --- 4c. PERCENTAGE ENGINE --------------------------------------------------
+slPct  = input.float(0.50, "Stop Loss (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+tp1Pct = input.float(0.50, "Take Profit 1 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+tp2Pct = input.float(1.00, "Take Profit 2 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+tp3Pct = input.float(1.50, "Take Profit 3 (%)", minval = 0.0, step = 0.05, group = G_PCT, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  5. MARKER STYLE  (shape AND colour are trader-selectable inputs)
+// -----------------------------------------------------------------------------
+buyShape   = input.string("Label Up", "Buy Marker Shape", options = ["Label Up", "Label Down", "Triangle Up", "Triangle Down", "Arrow Up", "Arrow Down", "Circle", "Diamond", "Flag", "Square", "Cross", "X Cross"], group = G_MRK, display = display.none)
+sellShape  = input.string("Label Down", "Sell Marker Shape", options = ["Label Up", "Label Down", "Triangle Up", "Triangle Down", "Arrow Up", "Arrow Down", "Circle", "Diamond", "Flag", "Square", "Cross", "X Cross"], group = G_MRK, display = display.none)
+buyCol     = input.color(color.green, "Buy Marker Colour", group = G_MRK, display = display.none)
+sellCol    = input.color(color.red, "Sell Marker Colour", group = G_MRK, display = display.none)
+buyTxtCol  = input.color(color.white, "Buy Marker Text Colour", group = G_MRK, display = display.none)
+sellTxtCol = input.color(color.white, "Sell Marker Text Colour", group = G_MRK, display = display.none)
+markSizeV  = input.string(size.small, "Marker Text Size", options = [size.tiny, size.small, size.normal, size.large], group = G_MRK, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  6. LINE & LABEL STYLE
+// -----------------------------------------------------------------------------
+entryCol   = input.color(color.yellow, "Entry Line Colour", group = G_LIN, display = display.none)
+slCol      = input.color(color.red, "Stop Loss Line Colour", group = G_LIN, display = display.none)
+tp1Col     = input.color(color.aqua, "Take Profit 1 Line Colour", group = G_LIN, display = display.none)
+tp2Col     = input.color(color.aqua, "Take Profit 2 Line Colour", group = G_LIN, display = display.none)
+tp3Col     = input.color(color.aqua, "Take Profit 3 Line Colour", group = G_LIN, display = display.none)
+lineWidth  = input.int(1, "Line Width", minval = 1, maxval = 4, group = G_LIN, display = display.none)
+lineStyleI = input.string("Solid", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = G_LIN, display = display.none)
+rightPad   = input.int(20, "Extend Lines / Labels To The Right (bars)", minval = 1, maxval = 200, group = G_LIN, tooltip = "Lines and labels are re-anchored to the live edge on EVERY bar, so they can never scroll off the screen.", display = display.none)
+showLvlLab = input.bool(true, "Show Level Labels", group = G_LIN, display = display.none)
+showPipLab = input.bool(true, "Show Distance In Pips On Labels", group = G_LIN, display = display.none)
+labSizeV   = input.string(size.small, "Label Text Size", options = [size.tiny, size.small, size.normal], group = G_LIN, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  7. ALERTS
+// -----------------------------------------------------------------------------
+alertMode = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALR, tooltip = "Two alerts: create one alert per condition, both with IDENTICAL settings.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker.", display = display.none)
+
+// -----------------------------------------------------------------------------
+//  8. TREND METER DASHBOARD
+// -----------------------------------------------------------------------------
+showTrend = input.bool(true, "Show Trend Meter", group = G_TRD, display = display.none)
+tfA       = input.timeframe("D", "Timeframe 1", group = G_TRD, display = display.none)
+tfB       = input.timeframe("240", "Timeframe 2", group = G_TRD, display = display.none)
+tfC       = input.timeframe("60", "Timeframe 3", group = G_TRD, display = display.none)
+tfD       = input.timeframe("15", "Timeframe 4", group = G_TRD, display = display.none)
+emaL1     = input.int(21, "EMA 1 (fastest)", minval = 1, group = G_TRD, display = display.none)
+emaL2     = input.int(50, "EMA 2", minval = 1, group = G_TRD, display = display.none)
+emaL3     = input.int(100, "EMA 3", minval = 1, group = G_TRD, display = display.none)
+emaL4     = input.int(200, "EMA 4 (slowest)", minval = 1, group = G_TRD, display = display.none)
+trUpCol   = input.color(color.new(color.green, 20), "Uptrend Cell Colour", group = G_TRD, display = display.none)
+trDnCol   = input.color(color.new(color.red, 20), "Downtrend Cell Colour", group = G_TRD, display = display.none)
+trNeCol   = input.color(color.new(color.gray, 40), "Neutral Cell Colour", group = G_TRD, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  9. SESSION PANEL
+// -----------------------------------------------------------------------------
+showSess  = input.bool(true, "Show Session Panel", group = G_SES, display = display.none)
+sessTz    = input.string("UTC", "Session Time Zone (IANA)", group = G_SES, tooltip = "Examples: UTC, Europe/London, America/New_York, Asia/Tokyo, Asia/Dubai. All session times below are read in THIS time zone.", display = display.none)
+asiaSess  = input.session("0000-0900", "Asian Session", group = G_SES, display = display.none)
+lonSess   = input.session("0800-1700", "London Session", group = G_SES, display = display.none)
+usSess    = input.session("1300-2200", "US Session", group = G_SES, display = display.none)
+sessBarW  = input.int(10, "Loading Bar Width (characters)", minval = 4, maxval = 30, group = G_SES, display = display.none)
+sessOnCol = input.color(color.new(color.green, 25), "Active Session Colour", group = G_SES, display = display.none)
+sessOffCol= input.color(color.new(color.gray, 60), "Inactive Session Colour", group = G_SES, display = display.none)
+sessOvCol = input.color(color.new(color.orange, 25), "Overlap Band Colour", group = G_SES, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  10. WIN RATE DASHBOARD
+// -----------------------------------------------------------------------------
+showWin  = input.bool(true, "Show Win Rate Dashboard", group = G_WIN, tooltip = "Replays the indicator's OWN Buy/Sell entries against the SAME SL/TP levels across loaded history. A quick overview, not a tick-precise backtester.", display = display.none)
+winCol   = input.color(color.lime, "Win Text Colour", group = G_WIN, display = display.none)
+lossCol  = input.color(color.red, "Loss Text Colour", group = G_WIN, display = display.none)
+
+// -----------------------------------------------------------------------------
+//  11. DASHBOARD LAYOUT
+//  All three tables are anchored to position.top_right - that is what puts
+//  their top edges on exactly the same line. The right-most table (Win Rate)
+//  sits flush to the chart edge. Each table further LEFT gets an empty, fully
+//  transparent spacer column on its RIGHT, wide enough to clear everything to
+//  its right plus a gap, which pushes its real content leftwards.
+// -----------------------------------------------------------------------------
+dashSizeV = input.string(size.small, "Dashboard Text Size", options = [size.tiny, size.small], group = G_LAY, display = display.none)
+dashBg    = input.color(color.new(color.black, 20), "Dashboard Background", group = G_LAY, display = display.none)
+dashHdrBg = input.color(color.new(color.blue, 40), "Dashboard Header Background", group = G_LAY, display = display.none)
+dashTxt   = input.color(color.white, "Dashboard Text Colour", group = G_LAY, display = display.none)
+gapSess   = input.int(22, "Session Panel Right Spacer (spaces)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Session Panel so it clears the Win Rate table. Increase if the two overlap.", display = display.none)
+gapTrend  = input.int(62, "Trend Meter Right Spacer (spaces)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Trend Meter so it clears BOTH tables to its right. Increase if they overlap.", display = display.none)
+
+// =============================================================================
+//  STYLE HELPERS - turn the text choices above into real Pine constants
+// =============================================================================
+f_markerStyle(string s) =>
+    switch s
+        "Label Up"      => label.style_label_up
+        "Label Down"    => label.style_label_down
+        "Triangle Up"   => label.style_triangleup
+        "Triangle Down" => label.style_triangledown
+        "Arrow Up"      => label.style_arrowup
+        "Arrow Down"    => label.style_arrowdown
+        "Circle"        => label.style_circle
+        "Diamond"       => label.style_diamond
+        "Flag"          => label.style_flag
+        "Square"        => label.style_square
+        "Cross"         => label.style_cross
+        "X Cross"       => label.style_xcross
+        => label.style_label_up
+
+f_lineStyle(string s) =>
+    switch s
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+lineStyleV = f_lineStyle(lineStyleI)
+transparent = color.new(color.black, 100)
+
+// =============================================================================
+//  TREND METER - multi-timeframe EMA alignment
+//  Computed FIRST because the optional signal filter reads it.
+//
+//  NON-REPAINTING: the score is shifted one HTF bar back INSIDE the security
+//  call ( s[1] ) and requested with lookahead_on. That combination always
+//  returns the last CLOSED higher-timeframe value, on every chart bar.
+// =============================================================================
+f_tfTrend() =>
+    float e1 = ta.ema(close, emaL1)
+    float e2 = ta.ema(close, emaL2)
+    float e3 = ta.ema(close, emaL3)
+    float e4 = ta.ema(close, emaL4)
+    int   s  = e1 > e2 and e2 > e3 and e3 > e4 ? 1 : e1 < e2 and e2 < e3 and e3 < e4 ? -1 : 0
+    int   out = s[1]
+    out
+
+int trA = nz(request.security(syminfo.tickerid, tfA, f_tfTrend(), lookahead = barmerge.lookahead_on), 0)
+int trB = nz(request.security(syminfo.tickerid, tfB, f_tfTrend(), lookahead = barmerge.lookahead_on), 0)
+int trC = nz(request.security(syminfo.tickerid, tfC, f_tfTrend(), lookahead = barmerge.lookahead_on), 0)
+int trD2 = nz(request.security(syminfo.tickerid, tfD, f_tfTrend(), lookahead = barmerge.lookahead_on), 0)
+
+bool allUp = trA == 1 and trB == 1 and trC == 1 and trD2 == 1
+bool allDn = trA == -1 and trB == -1 and trC == -1 and trD2 == -1
+string focusTxt = allUp ? "FOCUS: BUY ONLY" : allDn ? "FOCUS: SELL ONLY" : "NO ALIGNMENT — STAND ASIDE"
+color  focusBg  = allUp ? trUpCol : allDn ? trDnCol : trNeCol
+
+// =============================================================================
+//  ZIGZAG / SWING PIVOTS
+//  ta.* functions must run on EVERY bar (they are stateful), so they are called
+//  unconditionally here. Only the stored STATE below is gated on bar close.
+// =============================================================================
+bool toUp   = high >= ta.highest(high, zigzagLen)
+bool toDown = low  <= ta.lowest(low, zigzagLen)
+
+var int trend = 1
+int prevTrend = nz(trend[1], 1)
+int calcTrend = prevTrend == 1 and toDown ? -1 : prevTrend == -1 and toUp ? 1 : prevTrend
+
+// Distance back to the last swing-up event, clamped so the dynamic lookback can
+// never exceed max_bars_back.
+int   upSince  = math.max(1, math.min(nz(ta.barssince(toUp[1]), 1), 4000))
+float lowVal   = ta.lowest(low, upSince)
+int   lowIdx   = math.max(0, bar_index - nz(ta.barssince(lowVal == low), 0))
+
+int   dnSince  = math.max(1, math.min(nz(ta.barssince(toDown[1]), 1), 4000))
+float highVal  = ta.highest(high, dnSince)
+int   highIdx  = math.max(0, bar_index - nz(ta.barssince(highVal == high), 0))
+
+// Pivot history. Started EMPTY (the original pre-filled five zeros, which made
+// the first few structure reads compare against a price of 0.00).
+var array<float> hiVal = array.new<float>()
+var array<int>   hiIdx = array.new<int>()
+var array<float> loVal = array.new<float>()
+var array<int>   loIdx = array.new<int>()
+
+bool confirmed = barstate.isconfirmed
+bool trendFlip = false
+
+if confirmed
+    trend := calcTrend
+    if trend != prevTrend
+        trendFlip := true
+        if trend == 1
+            array.push(loVal, lowVal)
+            array.push(loIdx, lowIdx)
+            if array.size(loVal) > 12
+                array.shift(loVal)
+                array.shift(loIdx)
+        else
+            array.push(hiVal, highVal)
+            array.push(hiIdx, highIdx)
+            if array.size(hiVal) > 12
+                array.shift(hiVal)
+                array.shift(hiIdx)
+
+// Safe getters - return na instead of throwing when the history is not deep yet.
+f_hi(int back) =>
+    int n = array.size(hiVal)
+    float v = n > back ? array.get(hiVal, n - 1 - back) : na
+    int   x = n > back ? array.get(hiIdx, n - 1 - back) : na
+    [v, x]
+
+f_lo(int back) =>
+    int n = array.size(loVal)
+    float v = n > back ? array.get(loVal, n - 1 - back) : na
+    int   x = n > back ? array.get(loIdx, n - 1 - back) : na
+    [v, x]
+
+[h0, h0i] = f_hi(0)
+[h1, h1i] = f_hi(1)
+[l0, l0i] = f_lo(0)
+[l1, l1i] = f_lo(1)
+
+if trendFlip and showZigzag and not na(h0i) and not na(l0i)
+    if trend == 1
+        line.new(h0i, h0, l0i, l0, color = zzCol)
+    else
+        line.new(l0i, l0, h0i, h0, color = zzCol)
+
+// =============================================================================
+//  MARKET STRUCTURE BREAK -> BUY / SELL
+//  A break is only valid against the CURRENT market state, so signals strictly
+//  alternate BUY, SELL, BUY... and one setup is live at a time.
+//  usedL / usedH remember which pivot produced the last flip, so the very same
+//  pivot can never fire twice.
+// =============================================================================
+var int   market = 1
+var float usedL  = na
+var float usedH  = na
+
+bool structReady = array.size(hiVal) >= 2 and array.size(loVal) >= 2
+bool sameAsLast  = (not na(usedL) and usedL == l0) or (not na(usedH) and usedH == h0)
+
+bool bearBreak = structReady and not sameAsLast and market == 1 and not na(l0) and not na(l1) and not na(h0) and l0 < l1 and l0 < l1 - math.abs(h0 - l1) * fibFactor
+bool bullBreak = structReady and not sameAsLast and market == -1 and not na(h0) and not na(h1) and not na(l0) and h0 > h1 and h0 > h1 + math.abs(h1 - l0) * fibFactor
+
+bool trendOkBuy  = not useTrendFilter or allUp
+bool trendOkSell = not useTrendFilter or allDn
+
+bool buySignal  = false
+bool sellSignal = false
+
+if confirmed
+    if bullBreak and trendOkBuy
+        market := 1
+        usedL  := l0
+        usedH  := h0
+        buySignal := true
+    else if bearBreak and trendOkSell
+        market := -1
+        usedL  := l0
+        usedH  := h0
+        sellSignal := true
+
+if showMSB and buySignal and not na(h1i) and not na(h1)
+    line.new(h1i, h1, bar_index, h1, color = msbUpCol, width = 2)
+    label.new(int(math.avg(h1i, bar_index)), h1, "MSB", color = transparent, style = label.style_label_down, textcolor = msbUpCol, size = size.small)
+
+if showMSB and sellSignal and not na(l1i) and not na(l1)
+    line.new(l1i, l1, bar_index, l1, color = msbDnCol, width = 2)
+    label.new(int(math.avg(l1i, bar_index)), l1, "MSB", color = transparent, style = label.style_label_up, textcolor = msbDnCol, size = size.small)
+
+// =============================================================================
+//  DISTANCE ENGINES - Pip / ATR / Percentage
+// =============================================================================
+float atrVal   = ta.atr(atrLen)
+float pipPrice = pipMode == "Manual" ? manualPip : 10.0 * syminfo.mintick
+
+f_dist(string method, float pipsVal, float atrMult, float pctVal, float entryP) =>
+    float d = method == "Pip" ? pipsVal * pipPrice : method == "ATR" ? nz(atrVal) * atrMult : entryP * pctVal / 100.0
+    d
+
+// =============================================================================
+//  LEVEL CAPTURE  (only on a CONFIRMED break bar)
+// =============================================================================
+var float pEntry = na
+var float pSL    = na
+var float pTP1   = na
+var float pTP2   = na
+var float pTP3   = na
+var int   pDir   = 0
+
+bool newSetup = buySignal or sellSignal
+
+if newSetup
+    float e   = close
+    float dSL = f_dist(distMethod, slPips,  slAtr,  slPct,  e)
+    float d1  = f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, e)
+    float d2  = f_dist(distMethod, tp2Pips, tp2Atr, tp2Pct, e)
+    float d3  = f_dist(distMethod, tp3Pips, tp3Atr, tp3Pct, e)
+    pDir   := buySignal ? 1 : -1
+    pEntry := e
+    pSL    := buySignal ? e - dSL : e + dSL
+    pTP1   := buySignal ? e + d1  : e - d1
+    pTP2   := buySignal ? e + d2  : e - d2
+    pTP3   := buySignal ? e + d3  : e - d3
+
+// =============================================================================
+//  MARKERS
+//  Drawn with label.new(), NOT plotshape(). A plotshape() with a variable colour
+//  compiles into three plot outputs, and TradingView caps a script at 64 plot
+//  outputs - twelve shape choices per direction would blow that cap on its own
+//  and trip runtime error RE10140. Labels are drawing objects, so the full
+//  shape and colour choice costs zero plot outputs.
+// =============================================================================
+if buySignal
+    label.new(bar_index, low, "BUY", yloc = yloc.belowbar, style = f_markerStyle(buyShape), color = buyCol, textcolor = buyTxtCol, size = markSizeV)
+
+if sellSignal
+    label.new(bar_index, high, "SELL", yloc = yloc.abovebar, style = f_markerStyle(sellShape), color = sellCol, textcolor = sellTxtCol, size = markSizeV)
+
+// =============================================================================
+//  LEVEL LINES & LABELS - only the LATEST setup is ever on the chart
+// =============================================================================
+var line  lnE  = na
+var line  lnS  = na
+var line  lnT1 = na
+var line  lnT2 = na
+var line  lnT3 = na
+var label lbE  = na
+var label lbS  = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+
+f_labTxt(string tag, float lvl, float entryP) =>
+    string s = tag + "  " + str.tostring(lvl, format.mintick)
+    if showPipLab and pipPrice > 0 and not na(entryP) and not na(lvl)
+        s := s + "  (" + str.tostring(math.round(math.abs(lvl - entryP) / pipPrice, 1)) + " pips)"
+    s
+
+int x2 = bar_index + rightPad
+
+if newSetup
+    line.delete(lnE)
+    line.delete(lnS)
+    line.delete(lnT1)
+    line.delete(lnT2)
+    line.delete(lnT3)
+    label.delete(lbE)
+    label.delete(lbS)
+    label.delete(lbT1)
+    label.delete(lbT2)
+    label.delete(lbT3)
+    lnE  := line.new(bar_index, pEntry, x2, pEntry, color = entryCol, width = lineWidth, style = lineStyleV)
+    lnS  := line.new(bar_index, pSL,    x2, pSL,    color = slCol,    width = lineWidth, style = lineStyleV)
+    lnT1 := line.new(bar_index, pTP1,   x2, pTP1,   color = tp1Col,   width = lineWidth, style = lineStyleV)
+    lnT2 := line.new(bar_index, pTP2,   x2, pTP2,   color = tp2Col,   width = lineWidth, style = lineStyleV)
+    lnT3 := line.new(bar_index, pTP3,   x2, pTP3,   color = tp3Col,   width = lineWidth, style = lineStyleV)
+    if showLvlLab
+        lbE  := label.new(x2, pEntry, f_labTxt("ENTRY", pEntry, pEntry), style = label.style_label_left, color = transparent, textcolor = entryCol, size = labSizeV)
+        lbS  := label.new(x2, pSL,    f_labTxt("SL",    pSL,    pEntry), style = label.style_label_left, color = transparent, textcolor = slCol,    size = labSizeV)
+        lbT1 := label.new(x2, pTP1,   f_labTxt("TP1",   pTP1,   pEntry), style = label.style_label_left, color = transparent, textcolor = tp1Col,   size = labSizeV)
+        lbT2 := label.new(x2, pTP2,   f_labTxt("TP2",   pTP2,   pEntry), style = label.style_label_left, color = transparent, textcolor = tp2Col,   size = labSizeV)
+        lbT3 := label.new(x2, pTP3,   f_labTxt("TP3",   pTP3,   pEntry), style = label.style_label_left, color = transparent, textcolor = tp3Col,   size = labSizeV)
+
+// Re-anchor to the live edge on EVERY bar so nothing ever scrolls off screen.
+if not na(lnE)
+    line.set_x2(lnE,  x2)
+    line.set_x2(lnS,  x2)
+    line.set_x2(lnT1, x2)
+    line.set_x2(lnT2, x2)
+    line.set_x2(lnT3, x2)
+
+if not na(lbE)
+    label.set_x(lbE,  x2)
+    label.set_x(lbS,  x2)
+    label.set_x(lbT1, x2)
+    label.set_x(lbT2, x2)
+    label.set_x(lbT3, x2)
+
+// =============================================================================
+//  ORDER BLOCK / BREAKER BLOCK ZONES  (kept from the original MSB-OB)
+//  The original scanned these ranges on EVERY bar. Here the scan only runs on
+//  the break bar (the only moment the result is used), which is far cheaper,
+//  and it is clamped so a dynamic history reference can never go out of range.
+// =============================================================================
+var array<box> buObArr = array.new<box>()
+var array<box> beObArr = array.new<box>()
+var array<box> buBbArr = array.new<box>()
+var array<box> beBbArr = array.new<box>()
+
+// Returns the bars-back offset of the LAST candle of the wanted direction
+// inside the range, or na when the range is unusable / nothing matches.
+f_findBlock(int fromIdx, int toIdx, bool wantDown) =>
+    int res = na
+    int b = na(toIdx) ? na : math.min(toIdx, bar_index)
+    int a = na(fromIdx) or na(b) ? na : math.max(math.max(math.min(fromIdx, b), b - 300), bar_index - 4000)
+    if not na(a) and not na(b) and a <= b
+        for i = a to b
+            int off = bar_index - i
+            if off >= 0 and off <= 4000
+                bool isDown = open[off] > close[off]
+                if (wantDown and isDown) or (not wantDown and not isDown)
+                    res := off
+    res
+
+f_pushZone(array<box> arr, box nb) =>
+    array.push(arr, nb)
+    while array.size(arr) > maxZones
+        box old = array.shift(arr)
+        box.delete(old)
+    array.size(arr)
+
+// Extend live zones, delete broken ones, and report whether price is inside one.
+// Iterated BACKWARDS by index: the original shifted from the front of the array
+// while looping over that same array, which is undefined behaviour.
+f_manageZones(array<box> arr, bool bullish) =>
+    bool inZone = false
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            box bx = array.get(arr, i)
+            float top = box.get_top(bx)
+            float bot = box.get_bottom(bx)
+            bool broken = bullish ? close < bot : close > top
+            if broken
+                if deleteBoxes
+                    box.delete(bx)
+                array.remove(arr, i)
+            else
+                box.set_right(bx, x2)
+                if close <= top and close >= bot
+                    inZone := true
+    inZone
+
+if showBoxes and buySignal
+    // Bullish OB  = the last DOWN candle of the leg that ran from h1 to l0.
+    int obOff = f_findBlock(h1i, l0i, true)
+    if not na(obOff)
+        f_pushZone(buObArr, box.new(bar_index - obOff, high[obOff], x2, low[obOff], bgcolor = buObCol, border_color = buObBrd, text = "Bu-OB", text_color = buObTxt, text_halign = text.align_right, text_size = boxTxtSize))
+    // Bullish breaker / mitigation block = the last UP candle from l1 back to h1.
+    int bbOff = f_findBlock(na(l1i) ? na : l1i - zigzagLen, h1i, false)
+    if not na(bbOff)
+        f_pushZone(buBbArr, box.new(bar_index - bbOff, high[bbOff], x2, low[bbOff], bgcolor = buBbCol, border_color = buBbBrd, text = (not na(l0) and not na(l1) and l0 < l1) ? "Bu-BB" : "Bu-MB", text_color = buBbTxt, text_halign = text.align_right, text_size = boxTxtSize))
+
+if showBoxes and sellSignal
+    // Bearish OB = the last UP candle of the leg that ran from l1 to h0.
+    int obOffS = f_findBlock(l1i, h0i, false)
+    if not na(obOffS)
+        f_pushZone(beObArr, box.new(bar_index - obOffS, high[obOffS], x2, low[obOffS], bgcolor = beObCol, border_color = beObBrd, text = "Be-OB", text_color = beObTxt, text_halign = text.align_right, text_size = boxTxtSize))
+    // Bearish breaker / mitigation block = the last DOWN candle from h1 back to l1.
+    int bbOffS = f_findBlock(na(h1i) ? na : h1i - zigzagLen, l1i, true)
+    if not na(bbOffS)
+        f_pushZone(beBbArr, box.new(bar_index - bbOffS, high[bbOffS], x2, low[bbOffS], bgcolor = beBbCol, border_color = beBbBrd, text = (not na(h0) and not na(h1) and h0 > h1) ? "Be-BB" : "Be-MB", text_color = beBbTxt, text_halign = text.align_right, text_size = boxTxtSize))
+
+bool inBuOB = f_manageZones(buObArr, true)
+bool inBeOB = f_manageZones(beObArr, false)
+bool inBuBB = f_manageZones(buBbArr, true)
+bool inBeBB = f_manageZones(beBbArr, false)
+
+// =============================================================================
+//  ALERT PLOTS - read by {{plot("title")}}, matched by TITLE, never by number.
+//  display.none keeps them off the chart; TradingView still feeds display.none
+//  plots to the alert placeholders. nz(..., close) guarantees a finite number,
+//  so a level is never na on the bar the alert fires.
+// =============================================================================
+plot(nz(pEntry, close), title = "entry", display = display.none)
+plot(nz(pSL,    close), title = "sl",    display = display.none)
+plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
+plot(nz(pTP2,   close), title = "tp2",   display = display.none)
+plot(nz(pTP3,   close), title = "tp3",   display = display.none)
+
+// =============================================================================
+//  TVMT WEBHOOK ALERTS - the message box must contain ONLY this JSON.
+//  Trigger: "Once Per Bar Close".
+//  Note there is deliberately no {{strategy.order.id}} anywhere: this is an
+//  indicator, not a strategy, so that placeholder would resolve to empty and
+//  break the payload. The action is fixed to "buy" / "sell" instead.
+// =============================================================================
+alertcondition(buySignal, title = "MSB BUY (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "buy",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"\n}')
+
+alertcondition(sellSignal, title = "MSB SELL (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "sell",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-sell-{{time}}"\n}')
+
+// Structure-only and zone alerts, kept as separate alertcondition() entries.
+// The original fired these through alert() on every bar, which would have
+// pushed "Price in the BU-OB zone" straight into the TVMT webhook.
+alertcondition(buySignal or sellSignal, title = "MSB (any break)", message = "MSB")
+alertcondition(inBuOB, title = "Price In Bullish OB Zone", message = "Price in the BU-OB zone")
+alertcondition(inBeOB, title = "Price In Bearish OB Zone", message = "Price in the BE-OB zone")
+alertcondition(inBuBB, title = "Price In Bullish BB Zone", message = "Price in the BU-BB zone")
+alertcondition(inBeBB, title = "Price In Bearish BB Zone", message = "Price in the BE-BB zone")
+
+// -----------------------------------------------------------------------------
+//  SINGLE-ALERT PATH - identical JSON, but assembled inside Pine.
+//  Only runs when Alert Method is "One alert (alert function)". Because the
+//  script writes the message itself, exactly ONE payload is sent per signal and
+//  its "action" always matches the marker on the chart.
+//  Set the alert up as: Condition "MSB V1" -> "Any alert() function call".
+// -----------------------------------------------------------------------------
+f_json(string action) =>
+    string j = '{\n'
+    j := j + '  "symbol": "' + syminfo.ticker + '",\n'
+    j := j + '  "action": "' + action + '",\n'
+    j := j + '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
+    j := j + '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
+    j := j + '  "tp": '    + str.tostring(nz(pTP1,   close), format.mintick) + ',\n'
+    j := j + '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
+    j := j + '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
+    j := j + '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
+    j := j + '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
+    j := j + '}'
+    j
+
+if alertMode == "One alert (alert function)"
+    if buySignal
+        alert(f_json("buy"), alert.freq_once_per_bar_close)
+    else if sellSignal
+        alert(f_json("sell"), alert.freq_once_per_bar_close)
+
+// =============================================================================
+//  WIN RATE ENGINE
+//  Makes NO signals of its own. It replays the indicator's own entries against
+//  the SAME Entry / SL / TP1 / TP2 / TP3 the indicator drew, one virtual trade
+//  at a time, bar by bar across the loaded history.
+//    - SL touched before TP1  -> Loss
+//    - TP1 touched first      -> Win  (then TP2 / TP3 are tracked until SL or TP3)
+//    - a new signal replaces an unfinished trade; unfinished trades are not scored
+//  When one bar touches both sides, the order is ESTIMATED from that bar's open:
+//  whichever level sits closer to the open is assumed to have been reached first.
+//  Everything recalculates automatically when any input or the timeframe changes,
+//  because the levels it scores are the indicator's own captured levels.
+// =============================================================================
+var int   vDir  = 0
+var float vE    = na
+var float vS    = na
+var float v1    = na
+var float v2    = na
+var float v3    = na
+var bool  vDone = false
+var bool  vWin  = false
+var bool  v2Hit = false
+var bool  v3Hit = false
+
+var int cRes  = 0
+var int cWin  = 0
+var int cLoss = 0
+var int cSL   = 0
+var int c1    = 0
+var int c2    = 0
+var int c3    = 0
+
+if confirmed and vDir != 0
+    bool slHit = vDir == 1 ? low <= vS : high >= vS
+    bool t1Hit = vDir == 1 ? high >= v1 : low <= v1
+    bool t2Hit = vDir == 1 ? high >= v2 : low <= v2
+    bool t3Hit = vDir == 1 ? high >= v3 : low <= v3
+    bool slFirst = slHit and t1Hit ? math.abs(open - vS) <= math.abs(open - v1) : slHit
+    if not vDone
+        if slHit and not (t1Hit and not slFirst)
+            cRes  += 1
+            cLoss += 1
+            cSL   += 1
+            vDone := true
+            vWin  := false
+            vDir  := 0
+        else if t1Hit
+            cRes += 1
+            cWin += 1
+            c1   += 1
+            vDone := true
+            vWin  := true
+    if vDir != 0 and vDone and vWin
+        if t2Hit and not v2Hit
+            v2Hit := true
+            c2 += 1
+        if t3Hit and not v3Hit
+            v3Hit := true
+            c3 += 1
+        if t3Hit or slHit
+            vDir := 0
+
+if newSetup
+    vDir  := pDir
+    vE    := pEntry
+    vS    := pSL
+    v1    := pTP1
+    v2    := pTP2
+    v3    := pTP3
+    vDone := false
+    vWin  := false
+    v2Hit := false
+    v3Hit := false
+
+float winRate = cRes > 0 ? 100.0 * cWin / cRes : na
+float pctSL   = cRes > 0 ? 100.0 * cSL  / cRes : na
+float pct1    = cRes > 0 ? 100.0 * c1   / cRes : na
+float pct2    = cRes > 0 ? 100.0 * c2   / cRes : na
+float pct3    = cRes > 0 ? 100.0 * c3   / cRes : na
+
+f_pctTxt(float v) =>
+    na(v) ? "-" : str.tostring(v, "#.0") + "%"
+
+// =============================================================================
+//  SESSION HELPERS
+// =============================================================================
+f_pad2(int v) =>
+    (v < 10 ? "0" : "") + str.tostring(v)
+
+f_hhmm(int m) =>
+    int mm = m % 1440
+    int hh = int(mm / 60)
+    int mi = mm % 60
+    f_pad2(hh) + ":" + f_pad2(mi)
+
+// "0800-1700" (an optional ":1234567" day mask is ignored) -> [startMin, endMin]
+// A session that ends before it starts is treated as crossing midnight.
+f_sessBounds(string s) =>
+    string core = str.length(s) >= 9 ? str.substring(s, 0, 9) : "0000-0000"
+    int sh = int(math.round(nz(str.tonumber(str.substring(core, 0, 2)), 0)))
+    int sm = int(math.round(nz(str.tonumber(str.substring(core, 2, 4)), 0)))
+    int eh = int(math.round(nz(str.tonumber(str.substring(core, 5, 7)), 0)))
+    int em = int(math.round(nz(str.tonumber(str.substring(core, 7, 9)), 0)))
+    int st = sh * 60 + sm
+    int en = eh * 60 + em
+    int en2 = en <= st ? en + 1440 : en
+    [st, en2]
+
+f_sessState(int st, int en, int nowMin) =>
+    bool a1 = nowMin >= st and nowMin < en
+    bool a2 = (nowMin + 1440) >= st and (nowMin + 1440) < en
+    bool active = a1 or a2
+    float span = math.max(1, en - st)
+    float prog = a1 ? (nowMin - st) / span : a2 ? (nowMin + 1440 - st) / span : 0.0
+    [active, math.max(0.0, math.min(1.0, prog))]
+
+f_loadBar(float prog, int w) =>
+    int filled = int(math.max(0, math.min(w, math.round(prog * w))))
+    string full  = filled > 0 ? str.repeat("█", filled) : ""
+    string empty = (w - filled) > 0 ? str.repeat("░", w - filled) : ""
+    full + empty
+
+[asiaSt, asiaEn] = f_sessBounds(asiaSess)
+[lonSt,  lonEn ] = f_sessBounds(lonSess)
+[usSt,   usEn  ] = f_sessBounds(usSess)
+
+int nowMin = hour(timenow, sessTz) * 60 + minute(timenow, sessTz)
+
+[asiaOn, asiaPr] = f_sessState(asiaSt, asiaEn, nowMin)
+[lonOn,  lonPr ] = f_sessState(lonSt,  lonEn,  nowMin)
+[usOn,   usPr  ] = f_sessState(usSt,   usEn,   nowMin)
+
+// Overlap bands are the intersection of two sessions.
+int ovAlSt = math.max(asiaSt, lonSt)
+int ovAlEn = math.min(asiaEn, lonEn)
+int ovLuSt = math.max(lonSt, usSt)
+int ovLuEn = math.min(lonEn, usEn)
+bool ovAlOk = ovAlEn > ovAlSt
+bool ovLuOk = ovLuEn > ovLuSt
+[ovAlOn, ovAlPr] = f_sessState(ovAlSt, ovAlOk ? ovAlEn : ovAlSt + 1, nowMin)
+[ovLuOn, ovLuPr] = f_sessState(ovLuSt, ovLuOk ? ovLuEn : ovLuSt + 1, nowMin)
+
+// =============================================================================
+//  DASHBOARDS
+//  Three SEPARATE tables, all anchored to position.top_right so their top edges
+//  sit on exactly the same line, laid out left-to-right as:
+//      [ TREND METER ] [ SESSIONS ] [ WIN RATE |chart edge ]
+//  The Win Rate table is flush right. The other two each carry one empty, fully
+//  transparent spacer column on their RIGHT, which pushes their content left.
+//  Widen the spacers under "11 - Dashboard Layout" if anything ever overlaps.
+// =============================================================================
+f_trendCell(int sc) =>
+    sc == 1 ? trUpCol : sc == -1 ? trDnCol : trNeCol
+
+f_trendTxt(int sc) =>
+    sc == 1 ? "UP" : sc == -1 ? "DOWN" : "NEUTRAL"
+
+var table tTrend = table.new(position.top_right, 3, 6, bgcolor = transparent, border_width = 0, frame_width = 0)
+var table tSess  = table.new(position.top_right, 5, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
+var table tWin   = table.new(position.top_right, 2, 9, bgcolor = transparent, border_width = 0, frame_width = 0)
+
+if barstate.islast
+    // ---------------- TREND METER (left-most) ----------------
+    if showTrend
+        table.cell(tTrend, 2, 0, gapTrend > 0 ? str.repeat(" ", gapTrend) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
+        table.cell(tTrend, 0, 0, "TREND METER", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 0, "EMA " + str.tostring(emaL1) + "/" + str.tostring(emaL2) + "/" + str.tostring(emaL3) + "/" + str.tostring(emaL4), bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 0, 1, tfA, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 1, f_trendTxt(trA), bgcolor = f_trendCell(trA), text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 0, 2, tfB, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 2, f_trendTxt(trB), bgcolor = f_trendCell(trB), text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 0, 3, tfC, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 3, f_trendTxt(trC), bgcolor = f_trendCell(trC), text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 0, 4, tfD, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 4, f_trendTxt(trD2), bgcolor = f_trendCell(trD2), text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 0, 5, focusTxt, bgcolor = focusBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 5, "", bgcolor = focusBg, text_color = dashTxt, text_size = dashSizeV)
+
+    // ---------------- SESSION PANEL (middle) ----------------
+    if showSess
+        table.cell(tSess, 4, 0, gapSess > 0 ? str.repeat(" ", gapSess) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
+        table.cell(tSess, 0, 0, "SESSION", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 0, "TIME (" + sessTz + ")", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 0, "PROGRESS", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 0, "STATUS", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+
+        table.cell(tSess, 0, 1, "Asian", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 1, f_hhmm(asiaSt) + " - " + f_hhmm(asiaEn), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 1, f_loadBar(asiaPr, sessBarW), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 1, asiaOn ? "ACTIVE" : "closed", bgcolor = asiaOn ? sessOnCol : sessOffCol, text_color = dashTxt, text_size = dashSizeV)
+
+        table.cell(tSess, 0, 2, "London", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 2, f_hhmm(lonSt) + " - " + f_hhmm(lonEn), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 2, f_loadBar(lonPr, sessBarW), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 2, lonOn ? "ACTIVE" : "closed", bgcolor = lonOn ? sessOnCol : sessOffCol, text_color = dashTxt, text_size = dashSizeV)
+
+        table.cell(tSess, 0, 3, "US", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 3, f_hhmm(usSt) + " - " + f_hhmm(usEn), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 3, f_loadBar(usPr, sessBarW), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 3, usOn ? "ACTIVE" : "closed", bgcolor = usOn ? sessOnCol : sessOffCol, text_color = dashTxt, text_size = dashSizeV)
+
+        table.cell(tSess, 0, 4, "Asia-London", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 4, ovAlOk ? f_hhmm(ovAlSt) + " - " + f_hhmm(ovAlEn) : "no overlap", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 4, ovAlOk ? f_loadBar(ovAlPr, sessBarW) : "-", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 4, ovAlOk and ovAlOn ? "OVERLAP" : "-", bgcolor = ovAlOk and ovAlOn ? sessOvCol : sessOffCol, text_color = dashTxt, text_size = dashSizeV)
+
+        table.cell(tSess, 0, 5, "London-US", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 5, ovLuOk ? f_hhmm(ovLuSt) + " - " + f_hhmm(ovLuEn) : "no overlap", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 5, ovLuOk ? f_loadBar(ovLuPr, sessBarW) : "-", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 5, ovLuOk and ovLuOn ? "OVERLAP" : "-", bgcolor = ovLuOk and ovLuOn ? sessOvCol : sessOffCol, text_color = dashTxt, text_size = dashSizeV)
+
+        table.cell(tSess, 0, 6, "Now", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 1, 6, f_hhmm(nowMin), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 2, 6, "", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tSess, 3, 6, "", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+
+    // ---------------- WIN RATE (right-most, flush to the chart edge) ----------------
+    if showWin
+        table.cell(tWin, 0, 0, "WIN RATE", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 0, distMethod, bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 1, "Resolved", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 1, str.tostring(cRes), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 2, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 2, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 3, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 3, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 4, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 4, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= 50 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 5, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 5, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 6, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 6, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 7, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 7, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 8, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 8, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
