@@ -85,7 +85,7 @@ msbDnCol   = input.color(color.red, "Bearish MSB Colour", group = G_STR, display
 // -----------------------------------------------------------------------------
 //  2. SIGNAL FILTER (optional, OFF by default so signals are unchanged)
 // -----------------------------------------------------------------------------
-useTrendFilter = input.bool(false, "Only Take Signals Aligned With The Trend Meter", group = G_FIL, tooltip = "OFF by default. When ON, a BUY is only accepted while all four Trend Meter timeframes are up, and a SELL only while all four are down. A blocked break is not thrown away - it can still fire on a later bar once alignment appears.", display = display.none)
+minAligned = input.int(0, "Minimum Aligned Timeframes For A Signal", minval = 0, maxval = 4, group = G_FIL, tooltip = "0 = filter OFF (default): every structure break fires.\n1-3 = a BUY needs at least that many Trend Meter timeframes reading UP (a SELL, DOWN).\n4 = all four must agree, which on a fast chart can block signals for days. The Trend Meter shows the live setting, so a quiet chart always explains itself.", display = display.none)
 
 // -----------------------------------------------------------------------------
 //  3. ORDER BLOCK / BREAKER BLOCK ZONES (from the original indicator)
@@ -222,8 +222,11 @@ dashSizeV = input.string(size.small, "Dashboard Text Size", options = [size.tiny
 dashBg    = input.color(color.new(color.black, 20), "Dashboard Background", group = G_LAY, display = display.none)
 dashHdrBg = input.color(color.new(color.blue, 40), "Dashboard Header Background", group = G_LAY, display = display.none)
 dashTxt   = input.color(color.white, "Dashboard Text Colour", group = G_LAY, display = display.none)
-gapSess   = input.int(26, "Session Panel Right Spacer (characters)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Session Panel so it clears the Win Rate table. Increase if the two overlap.", display = display.none)
-gapTrend  = input.int(70, "Trend Meter Right Spacer (characters)", minval = 0, maxval = 200, group = G_LAY, tooltip = "Widens the invisible column on the RIGHT of the Trend Meter so it clears BOTH tables to its right. Increase if they overlap.", display = display.none)
+posTrend  = input.string("Top Right", "Trend Meter Position", options = ["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], group = G_LAY, tooltip = "Leave all three on Top Right for the side-by-side row. If they ever sit on top of each other, move this one to Top Left - its spacer switches off automatically.", display = display.none)
+posSess   = input.string("Top Right", "Session Panel Position", options = ["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], group = G_LAY, display = display.none)
+posWin    = input.string("Top Right", "Win Rate Position", options = ["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], group = G_LAY, display = display.none)
+gapSess   = input.float(9.0, "Session Panel Right Spacer (% of chart width)", minval = 0.0, maxval = 60.0, step = 0.5, group = G_LAY, tooltip = "Reserves an invisible column on the RIGHT of the Session Panel so it clears the Win Rate table. Only applies while this panel is on Top Right.", display = display.none)
+gapTrend  = input.float(26.0, "Trend Meter Right Spacer (% of chart width)", minval = 0.0, maxval = 60.0, step = 0.5, group = G_LAY, tooltip = "Reserves an invisible column on the RIGHT of the Trend Meter so it clears BOTH tables to its right. Only applies while this panel is on Top Right.", display = display.none)
 
 // =============================================================================
 //  STYLE HELPERS - turn the text choices above into real Pine constants
@@ -243,6 +246,17 @@ f_markerStyle(string s) =>
         "Cross"         => label.style_cross
         "X Cross"       => label.style_xcross
         => label.style_label_up
+
+f_pos(string s) =>
+    switch s
+        "Top Center"    => position.top_center
+        "Top Left"      => position.top_left
+        "Middle Right"  => position.middle_right
+        "Middle Left"   => position.middle_left
+        "Bottom Right"  => position.bottom_right
+        "Bottom Center" => position.bottom_center
+        "Bottom Left"   => position.bottom_left
+        => position.top_right
 
 f_lineStyle(string s) =>
     switch s
@@ -370,8 +384,10 @@ bool sameAsLast  = (not na(usedL) and usedL == l0) or (not na(usedH) and usedH =
 bool bearBreak = structReady and not sameAsLast and market == 1 and not na(l0) and not na(l1) and not na(h0) and l0 < l1 and l0 < l1 - math.abs(h0 - l1) * fibFactor
 bool bullBreak = structReady and not sameAsLast and market == -1 and not na(h0) and not na(h1) and not na(l0) and h0 > h1 and h0 > h1 + math.abs(h1 - l0) * fibFactor
 
-bool trendOkBuy  = not useTrendFilter or allUp
-bool trendOkSell = not useTrendFilter or allDn
+int upCount = (trA == 1 ? 1 : 0) + (trB == 1 ? 1 : 0) + (trC == 1 ? 1 : 0) + (trD2 == 1 ? 1 : 0)
+int dnCount = (trA == -1 ? 1 : 0) + (trB == -1 ? 1 : 0) + (trC == -1 ? 1 : 0) + (trD2 == -1 ? 1 : 0)
+bool trendOkBuy  = minAligned == 0 or upCount >= minAligned
+bool trendOkSell = minAligned == 0 or dnCount >= minAligned
 
 bool buySignal  = false
 bool sellSignal = false
@@ -705,6 +721,10 @@ if confirmed and vDir != 0
         if t3Hit or slHit
             vDir := 0
 
+var int cSignals = 0
+if newSetup
+    cSignals += 1
+
 if newSetup
     vDir  := pDir
     vE    := pEntry
@@ -805,14 +825,25 @@ f_trendCell(int sc) =>
 f_trendTxt(int sc) =>
     sc == 1 ? "UP" : sc == -1 ? "DOWN" : "NEUTRAL"
 
-var table tTrend = table.new(position.top_right, 3, 6, bgcolor = transparent, border_width = 0, frame_width = 0)
-var table tSess  = table.new(position.top_right, 5, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
-var table tWin   = table.new(position.top_right, 2, 9, bgcolor = transparent, border_width = 0, frame_width = 0)
+// A spacer only makes sense while a panel shares the top-right anchor with the
+// ones to its right, so moving a panel elsewhere switches its spacer off.
+float spTrend = posTrend == "Top Right" ? gapTrend : 0.0
+float spSess  = posSess  == "Top Right" ? gapSess  : 0.0
+
+// Filter status, reported straight back on the Trend Meter so a chart with no
+// signals always says why.
+string filtTxt = minAligned == 0 ? "FILTER: OFF - all breaks fire" : "FILTER: need " + str.tostring(minAligned) + " of 4 aligned"
+bool   filtBlocking = minAligned > 0 and upCount < minAligned and dnCount < minAligned
+color  filtBg  = minAligned == 0 ? trNeCol : filtBlocking ? trDnCol : trUpCol
+
+var table tTrend = table.new(f_pos(posTrend), 3, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
+var table tSess  = table.new(f_pos(posSess),  5, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
+var table tWin   = table.new(f_pos(posWin),   2, 10, bgcolor = transparent, border_width = 0, frame_width = 0)
 
 if barstate.islast
     // ---------------- TREND METER (left-most) ----------------
     if showTrend
-        table.cell(tTrend, 2, 0, gapTrend > 0 ? str.repeat("0", gapTrend) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
+        table.cell(tTrend, 2, 0, "", width = spTrend, bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
         table.cell(tTrend, 0, 0, "TREND METER", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tTrend, 1, 0, "EMA " + str.tostring(emaL1) + "/" + str.tostring(emaL2) + "/" + str.tostring(emaL3) + "/" + str.tostring(emaL4), bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tTrend, 0, 1, tfA, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
@@ -824,11 +855,13 @@ if barstate.islast
         table.cell(tTrend, 0, 4, tfD, bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tTrend, 1, 4, f_trendTxt(trD2), bgcolor = f_trendCell(trD2), text_color = dashTxt, text_size = dashSizeV)
         table.cell(tTrend, 0, 5, focusTxt, bgcolor = focusBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tTrend, 1, 5, "", bgcolor = focusBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 5, str.tostring(upCount) + "up/" + str.tostring(dnCount) + "dn", bgcolor = focusBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 0, 6, filtTxt, bgcolor = filtBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tTrend, 1, 6, filtBlocking ? "BLOCKING" : "passing", bgcolor = filtBg, text_color = dashTxt, text_size = dashSizeV)
 
     // ---------------- SESSION PANEL (middle) ----------------
     if showSess
-        table.cell(tSess, 4, 0, gapSess > 0 ? str.repeat("0", gapSess) : "", bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
+        table.cell(tSess, 4, 0, "", width = spSess, bgcolor = transparent, text_color = transparent, text_size = dashSizeV)
         table.cell(tSess, 0, 0, "SESSION", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tSess, 1, 0, "TIME (" + sessTz + ")", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tSess, 2, 0, "PROGRESS", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
@@ -868,19 +901,21 @@ if barstate.islast
     if showWin
         table.cell(tWin, 0, 0, "WIN RATE", bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
         table.cell(tWin, 1, 0, distMethod, bgcolor = dashHdrBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 1, "Resolved", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 1, str.tostring(cRes), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 0, 2, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 2, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 3, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 3, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 4, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 4, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= 50 ? winCol : lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 5, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 5, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 6, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 6, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 7, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 7, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
-        table.cell(tWin, 0, 8, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
-        table.cell(tWin, 1, 8, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 1, "Signals", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 1, str.tostring(cSignals), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 2, "Resolved", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 2, str.tostring(cRes), bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 0, 3, "Wins", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 3, str.tostring(cWin), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 4, "Losses", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 4, str.tostring(cLoss), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 5, "Win Rate", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 5, f_pctTxt(winRate), bgcolor = dashBg, text_color = nz(winRate, 0) >= 50 ? winCol : lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 6, "Hit SL", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 6, f_pctTxt(pctSL), bgcolor = dashBg, text_color = lossCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 7, "Hit TP1", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 7, f_pctTxt(pct1), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 8, "Hit TP2", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 8, f_pctTxt(pct2), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
+        table.cell(tWin, 0, 9, "Hit TP3", bgcolor = dashBg, text_color = dashTxt, text_size = dashSizeV)
+        table.cell(tWin, 1, 9, f_pctTxt(pct3), bgcolor = dashBg, text_color = winCol, text_size = dashSizeV)
