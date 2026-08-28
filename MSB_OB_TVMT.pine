@@ -395,3 +395,141 @@ if tvmt_on
         alert(f_tvmt_json("buy"), alert.freq_once_per_bar_close)
     else if sell_signal
         alert(f_tvmt_json("sell"), alert.freq_once_per_bar_close)
+
+
+// ===========================================================================
+//  WIN RATE  (added - scoring only, makes no signals and sends no alerts)
+//
+//  This script deliberately sends no sl/tp, so there is nothing on the chart
+//  to score against. The trade outcome is decided entirely by TVMT's Trading
+//  Setup, and that is what this models: the fixed SL/TP pips the bridge
+//  applies, close-and-reverse on an opposite signal, and Block Duplicate
+//  Entries skipping a same-direction signal while a position is already open.
+//
+//  Those two behaviours matter more than they look. Blocking duplicates means
+//  a run of BUYs in one zone is ONE trade, not five, so the raw signal count
+//  is not the trade count. And a reversal closes at market rather than at a
+//  level, so it scores wherever price happened to be.
+//
+//  Set the pips below to match TVMT exactly or the number is fiction.
+//
+//  Judge a configuration on Expectancy, never on Win Rate. Win Rate counts
+//  only trades that reached SL or TP; the reversals it leaves out are the
+//  ones that tend to be losing, because an opposite signal usually arrives
+//  when price has already gone against the position.
+// ===========================================================================
+wr_settings = "Win Rate (models your TVMT Trading Setup)"
+show_wr = input.bool(true, "Show Win Rate Dashboard", group=wr_settings)
+wr_pip_mode = input.string("Manual", "Pip Size Mode", ["Auto (10 x mintick)", "Manual"], group=wr_settings, tooltip="Auto computes 10 x mintick, which only lands on the conventional gold pip of 0.10 for a TWO-decimal feed. On a THREE-decimal gold feed it returns 0.01, ten times too small, and every pip figure below is then wrong by that factor. Manual 0.10 is correct for gold either way.")
+wr_manual_pip = input.float(0.10, "Manual Pip Size (price units)", minval=0.0, step=0.00001, group=wr_settings)
+wr_sl_pips = input.float(80.0, "Stop Loss (pips)", minval=0.1, step=1.0, group=wr_settings, tooltip="Copy the value from TVMT -> Trading Setup -> Stop Loss (SL) Pips.")
+wr_tp_pips = input.float(160.0, "Take Profit (pips)", minval=0.1, step=1.0, group=wr_settings, tooltip="Copy the value from TVMT -> Trading Setup -> Take Profit (TP) Pips.")
+wr_cost_pips = input.float(3.5, "Round-Turn Cost (pips)", minval=0.0, step=0.1, group=wr_settings, tooltip="Spread plus commission plus entry slippage, charged once against every trade. Measure it rather than guess: compare one real broker fill against the price on the signal candle. 0 reports gross figures.")
+wr_block_dup = input.bool(true, "Block Duplicate Entries", group=wr_settings, tooltip="Mirrors the TVMT setting. On: a signal in the direction already held is skipped, so several signals in one zone count as a single trade.")
+wr_reverse = input.bool(true, "Close And Reverse On Opposite Signal", group=wr_settings, tooltip="Mirrors TVMT's Opposite-signal handling. On: the opposite signal closes the open trade at that bar's close and opens the other way.")
+wr_pos_in = input.string("Top Right", "Dashboard Position", ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=wr_settings)
+
+wr_pip = wr_pip_mode == "Manual" ? wr_manual_pip : 10.0 * syminfo.mintick
+wr_risk = wr_sl_pips * wr_pip
+wr_rew = wr_tp_pips * wr_pip
+wr_rr = wr_risk > 0 ? wr_rew / wr_risk : na
+wr_costR = wr_risk > 0 ? wr_cost_pips * wr_pip / wr_risk : 0.0
+
+var int wr_pos = 0
+var float wr_entry = na
+var float wr_sl = na
+var float wr_tp = na
+
+var int c_sig = 0
+var int c_skip = 0
+var int c_trade = 0
+var int c_win = 0
+var int c_loss = 0
+var int c_rev = 0
+var float wr_sumR = 0.0
+
+if barstate.isconfirmed and wr_risk > 0
+    // Resolve an open trade first, so a bar that both stops out an old trade
+    // and signals a new one is counted as the loss it was.
+    if wr_pos != 0
+        bool hitSL = wr_pos == 1 ? low <= wr_sl : high >= wr_sl
+        bool hitTP = wr_pos == 1 ? high >= wr_tp : low <= wr_tp
+        // One bar can touch both. Tick order is unknowable, so the level
+        // nearer this bar's open is assumed to have been reached first.
+        bool slFirst = hitSL and hitTP ? math.abs(open - wr_sl) <= math.abs(open - wr_tp) : hitSL
+        if hitSL and slFirst
+            c_loss += 1
+            wr_sumR += -1.0 - wr_costR
+            wr_pos := 0
+        else if hitTP
+            c_win += 1
+            wr_sumR += wr_rr - wr_costR
+            wr_pos := 0
+
+    if buy_signal or sell_signal
+        c_sig += 1
+        int want = buy_signal ? 1 : -1
+        if wr_pos == want
+            c_skip += 1
+        else if wr_pos == -want and not wr_reverse
+            c_skip += 1
+        else
+            if wr_pos == -want
+                // Reversal closes at market, so it books whatever R it had.
+                wr_sumR += (wr_pos == 1 ? (close - wr_entry) : (wr_entry - close)) / wr_risk - wr_costR
+                c_rev += 1
+            wr_pos := want
+            wr_entry := close
+            wr_sl := want == 1 ? close - wr_risk : close + wr_risk
+            wr_tp := want == 1 ? close + wr_rew : close - wr_rew
+            c_trade += 1
+
+int wr_res = c_win + c_loss
+int wr_scored = wr_res + c_rev
+float wr_winrate = wr_res > 0 ? 100.0 * c_win / wr_res : na
+float wr_exp = wr_scored > 0 ? wr_sumR / wr_scored : na
+float wr_bewr = na(wr_rr) ? na : 100.0 / (1.0 + wr_rr)
+
+f_wr_r(v) =>
+    na(v) ? "-" : (v >= 0 ? "+" : "") + str.tostring(v, "0.00") + "R"
+
+f_wr_pct(v) =>
+    na(v) ? "-" : str.tostring(v, "0.0") + "%"
+
+f_wr_pos(sp) =>
+    sp == "Top Left" ? position.top_left : sp == "Bottom Right" ? position.bottom_right : sp == "Bottom Left" ? position.bottom_left : position.top_right
+
+var table wr_tbl = table.new(f_wr_pos(wr_pos_in), 2, 13, bgcolor=color.new(color.black, 20), border_width=0, frame_width=0)
+
+if barstate.islast and show_wr
+    hdr = color.new(color.blue, 40)
+    bg = color.new(color.black, 20)
+    tx = color.white
+    gd = color.lime
+    bd = color.red
+    table.cell(wr_tbl, 0, 0, "WIN RATE", bgcolor=hdr, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 0, str.tostring(wr_sl_pips, "0") + "/" + str.tostring(wr_tp_pips, "0") + (wr_cost_pips > 0 ? " NET" : " GROSS"), bgcolor=hdr, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 1, "Signals", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 1, str.tostring(c_sig), bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 2, "Skipped (duplicate)", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 2, str.tostring(c_skip), bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 3, "Trades taken", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 3, str.tostring(c_trade), bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 4, "Hit TP", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 4, str.tostring(c_win), bgcolor=bg, text_color=gd, text_size=size.small)
+    table.cell(wr_tbl, 0, 5, "Hit SL", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 5, str.tostring(c_loss), bgcolor=bg, text_color=bd, text_size=size.small)
+    table.cell(wr_tbl, 0, 6, "Closed by reversal", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 6, str.tostring(c_rev), bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 7, "Scored", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 7, str.tostring(wr_scored), bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 8, "Win Rate", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 8, f_wr_pct(wr_winrate), bgcolor=bg, text_color=nz(wr_winrate, 0) >= nz(wr_bewr, 100) ? gd : bd, text_size=size.small)
+    table.cell(wr_tbl, 0, 9, "Break-even WR", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 9, f_wr_pct(wr_bewr), bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 0, 10, "Expectancy / trade", bgcolor=hdr, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 10, f_wr_r(wr_exp), bgcolor=hdr, text_color=nz(wr_exp, -1) > 0 ? gd : bd, text_size=size.small)
+    table.cell(wr_tbl, 0, 11, "Total R", bgcolor=hdr, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 11, f_wr_r(wr_sumR), bgcolor=hdr, text_color=wr_sumR > 0 ? gd : bd, text_size=size.small)
+    table.cell(wr_tbl, 0, 12, "Cost / trade", bgcolor=bg, text_color=tx, text_size=size.small)
+    table.cell(wr_tbl, 1, 12, wr_cost_pips <= 0 ? "not counted" : "-" + str.tostring(wr_costR, "0.000") + "R", bgcolor=bg, text_color=wr_cost_pips <= 0 ? bd : tx, text_size=size.small)
