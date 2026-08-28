@@ -1,0 +1,300 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EmreKb
+//
+// ORIGINAL WORK: "Market Structure Break & Order Block" (MSB-OB) © EmreKb — MPL-2.0
+// THIS FILE:     the same script with a TVMT webhook alert added, also MPL-2.0.
+//
+// WHAT WAS CHANGED, AND NOTHING ELSE:
+//
+//   1. ADDED  BUY and SELL labels on the break bar. The engine already decided
+//             direction (market flips to 1 bullish, -1 bearish) but never drew
+//             it - the only tag was "MSB" back at the broken swing.
+//
+//   2. ADDED  a "TVMT Alerts" input group and an alert() call that fires a JSON
+//             BUY / SELL payload on each market structure break.
+//
+//   3. GATED  the four existing zone alerts behind a toggle, default OFF.
+//             This one is not optional. TradingView's "Any alert() function
+//             call" condition fires on EVERY alert() in the script, so those
+//             four would post "Price in the BU-OB zone" — plain text, not JSON —
+//             into the same webhook as the trade signals. Worse, the zone tests
+//             are levels rather than edges, so they fire on every bar while
+//             price sits inside a box. Left as they were, they would bury the
+//             BUY/SELL messages under unparseable ones.
+//
+//   The signal engine, zigzag, order blocks, breaker blocks, drawings, inputs
+//   and Pine version are untouched.
+//
+// ALERT SETUP (once):
+//   Right-click chart → Add alert
+//     → Condition: "MSB-OB"  →  "Any alert() function call"
+//     → Notifications → Webhook URL → your TVMT bridge URL
+//     → Leave the message box alone; the script writes it.
+//
+//   The payload carries no sl/tp — TVMT applies its own from Trading Setup.
+//
+//   TradingView freezes BOTH the script AND its input settings into an alert
+//   at the moment you create it. Changing either afterwards does not update a
+//   running alert: delete it and create a new one, or the bridge keeps trading
+//   the old configuration.
+
+//@version=5
+indicator("Market Structure Break & Order Block", "MSB-OB", overlay=true, max_lines_count=500, max_labels_count=500, max_bars_back=4900, max_boxes_count=500)
+
+settings = "Settings"
+zigzag_len = input.int(9, "ZigZag Length", group=settings)
+show_zigzag = input.bool(true, "Show Zigzag", group=settings)
+fib_factor = input.float(0.33, "Fib Factor for breakout confirmation", 0, 1, 0.01, group=settings)
+
+text_size = input.string(size.tiny, "Text Size", [size.tiny, size.small, size.normal, size.large, size.huge], group=settings)
+
+delete_boxes = input.bool(true, "Delete Old/Broken Boxes", group=settings)
+
+// ---------------------------------------------------------------------------
+//  BUY / SELL SIGNALS  (added)
+//
+//  The original engine already decides direction - market flips to 1 on a
+//  bullish structure break and to -1 on a bearish one - but it only ever drew
+//  an "MSB" tag back at the broken swing. These labels mark the break bar
+//  itself, so the entry the alert fires on is the one you can see.
+// ---------------------------------------------------------------------------
+signal_settings = "BUY / SELL Signals"
+show_signals = input.bool(true, "Show BUY / SELL Labels", group=signal_settings)
+buy_color = input.color(color.green, "BUY", group=signal_settings, inline="buy")
+buy_text_color = input.color(color.white, "Text", group=signal_settings, inline="buy")
+sell_color = input.color(color.red, "SELL", group=signal_settings, inline="sell")
+sell_text_color = input.color(color.white, "Text", group=signal_settings, inline="sell")
+signal_size = input.string(size.small, "Label Size", [size.tiny, size.small, size.normal, size.large], group=signal_settings)
+
+// ---------------------------------------------------------------------------
+//  TVMT ALERTS  (added)
+// ---------------------------------------------------------------------------
+tvmt_settings = "TVMT Alerts"
+tvmt_on = input.bool(true, "Send BUY / SELL Alerts To TVMT", group=tvmt_settings, tooltip="Silences the webhook without deleting the alert. Remember TradingView froze this setting into the alert when you created it — changing it here only affects a NEWLY created alert.")
+sym_override = input.string("", "Webhook Symbol Override", group=tvmt_settings, tooltip="Leave empty to send the chart's own ticker. A TVC:GOLD chart sends \"GOLD\", which will not match a broker account trading XAUUSD — type the broker's exact symbol here to send that instead. Only needed if TVMT's auto-detect misses.")
+zone_alerts = input.bool(false, "Also Send Order Block Zone Alerts", group=tvmt_settings, tooltip="OFF by default, and it should stay off on any alert wired to a trading webhook.\n\nThese four alerts send PLAIN TEXT (\"Price in the BU-OB zone\"), not JSON, and TradingView's \"Any alert() function call\" condition fires on every alert() in the script — so they go to the same webhook as your trades. They also test a LEVEL rather than an edge, so they fire on every bar while price sits inside a box.\n\nTurn on only for a separate, notification-only alert.")
+
+bu_ob_inline_color = "Bu-OB Colors"
+be_ob_inline_color = "Be-OB Colors"
+bu_bb_inline_color = "Bu-BB Colors"
+be_bb_inline_color = "Be-BB Colors"
+
+bu_ob_display_settings = "Bu-OB Display Settings"
+bu_ob_color = input.color(color.new(color.green, 70), "Color", group=bu_ob_display_settings, inline=bu_ob_inline_color)
+bu_ob_border_color = input.color(color.green, "Border Color", group=bu_ob_display_settings, inline=bu_ob_inline_color)
+bu_ob_text_color = input.color(color.green, "Text Color", group=bu_ob_display_settings, inline=bu_ob_inline_color)
+
+be_ob_display_settings = "Be-OB Display Settings"
+be_ob_color = input.color(color.new(color.red, 70), "Color", group=be_ob_display_settings, inline=be_ob_inline_color)
+be_ob_border_color = input.color(color.red, "Border Color", group=be_ob_display_settings, inline=be_ob_inline_color)
+be_ob_text_color = input.color(color.red, "Text Color", group=be_ob_display_settings, inline=be_ob_inline_color)
+
+bu_bb_display_settings = "Bu-BB & Bu-MB Display Settings"
+bu_bb_color = input.color(color.new(color.green, 70), "Color", group=bu_bb_display_settings, inline=bu_bb_inline_color)
+bu_bb_border_color = input.color(color.green, "Border Color", group=bu_bb_display_settings, inline=bu_bb_inline_color)
+bu_bb_text_color = input.color(color.green, "Text Color", group=bu_bb_display_settings, inline=bu_bb_inline_color)
+
+be_bb_display_settings = "Be-BB & Be-MB Display Settings"
+be_bb_color = input.color(color.new(color.red, 70), "Color", group=be_bb_display_settings, inline=be_bb_inline_color)
+be_bb_border_color = input.color(color.red, "Border Color", group=be_bb_display_settings, inline=be_bb_inline_color)
+be_bb_text_color = input.color(color.red, "Text Color", group=be_bb_display_settings, inline=be_bb_inline_color)
+
+
+var float[] high_points_arr = array.new_float(5)
+var int[] high_index_arr = array.new_int(5)
+var float[] low_points_arr = array.new_float(5)
+var int[] low_index_arr = array.new_int(5)
+
+var box[] bu_ob_boxes = array.new_box(5)
+var box[] be_ob_boxes = array.new_box(5)
+var box[] bu_bb_boxes = array.new_box(5)
+var box[] be_bb_boxes = array.new_box(5)
+
+to_up = high >= ta.highest(zigzag_len)
+to_down = low <= ta.lowest(zigzag_len)
+
+trend = 1
+trend := nz(trend[1], 1)
+trend := trend == 1 and to_down ? -1 : trend == -1 and to_up ? 1 : trend
+
+last_trend_up_since = ta.barssince(to_up[1])
+low_val = ta.lowest(nz(last_trend_up_since > 0 ? last_trend_up_since : 1, 1))
+low_index = bar_index - ta.barssince(low_val == low)
+
+last_trend_down_since = ta.barssince(to_down[1])
+high_val = ta.highest(nz(last_trend_down_since > 0 ? last_trend_down_since : 1, 1))
+high_index = bar_index - ta.barssince(high_val == high)
+
+if ta.change(trend) != 0
+    if trend == 1
+        array.push(low_points_arr, low_val)
+        array.push(low_index_arr, low_index)
+    if trend == -1
+        array.push(high_points_arr, high_val)
+        array.push(high_index_arr, high_index)
+
+
+f_get_high(ind) =>
+    [array.get(high_points_arr, array.size(high_points_arr) - 1 - ind), array.get(high_index_arr, array.size(high_index_arr) - 1 - ind)]
+
+
+f_get_low(ind) =>
+    [array.get(low_points_arr, array.size(low_points_arr) - 1 - ind), array.get(low_index_arr, array.size(low_index_arr) - 1 - ind)]
+
+
+f_delete_box(box_arr) =>
+    if delete_boxes
+        box.delete(array.shift(box_arr))
+    else
+        array.shift(box_arr)
+    0
+
+
+// TVMT payload. No sl/tp: the bridge applies its own from Trading Setup.
+// tv_alert_id uses the BAR time, so a repeat of the same bar is recognisable
+// as a duplicate by the receiving end.
+f_tvmt_json(action) =>
+    sym = str.length(sym_override) > 0 ? sym_override : syminfo.ticker
+    '{"symbol": "' + sym + '", "action": "' + action + '", "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '", "tv_alert_id": "tv-' + sym + '-' + action + '-' + str.tostring(time) + '"}'
+
+
+[h0, h0i] = f_get_high(0)
+[h1, h1i] = f_get_high(1)
+
+[l0, l0i] = f_get_low(0)
+[l1, l1i] = f_get_low(1)
+
+if ta.change(trend) != 0 and show_zigzag
+    if trend == 1
+        line.new(h0i, h0, l0i, l0)
+    if trend == -1
+        line.new(l0i, l0, h0i, h0)
+
+market = 1
+market := nz(market[1], 1)
+// market := market == 1 and close < l0 and low < l0 - math.abs(h0 - l0) * fib_factor ? -1 : market == -1 and close > h0 and high > h0 + math.abs(h0 - l0) * fib_factor ? 1 : market
+last_l0 = ta.valuewhen(ta.change(market) != 0, l0, 0)
+last_h0 = ta.valuewhen(ta.change(market) != 0, h0, 0)
+market := last_l0 == l0 or last_h0 == h0 ? market : market == 1 and l0 < l1 and l0 < l1 - math.abs(h0 - l1) * fib_factor ? -1 : market == -1 and h0 > h1 and h0 > h1 + math.abs(h1 - l0) * fib_factor ? 1 : market
+
+bu_ob_index = bar_index
+bu_ob_index := nz(bu_ob_index[1], bar_index)
+for i=h1i to l0i[zigzag_len]
+    index = bar_index - i
+    if open[index] > close[index]
+        bu_ob_index := bar_index[index]
+
+bu_ob_since = bar_index - bu_ob_index
+
+be_ob_index = bar_index
+be_ob_index := nz(be_ob_index[1], bar_index)
+for i=l1i to h0i[zigzag_len]
+    index = bar_index - i
+    if open[index] < close[index]
+        be_ob_index := bar_index[index]
+
+be_ob_since = bar_index - be_ob_index
+
+be_bb_index = bar_index
+be_bb_index := nz(be_bb_index[1], bar_index)
+for i=h1i - zigzag_len to l1i
+    index = bar_index - i
+    if open[index] > close[index]
+        be_bb_index := bar_index[index]
+
+be_bb_since = bar_index - be_bb_index
+
+bu_bb_index = bar_index
+bu_bb_index := nz(bu_bb_index[1], bar_index)
+for i=l1i - zigzag_len to h1i
+    index = bar_index - i
+    if open[index] < close[index]
+        bu_bb_index := bar_index[index]
+
+bu_bb_since = bar_index - bu_bb_index
+
+if ta.change(market) != 0
+    if market == 1
+        line.new(h1i, h1, h0i, h1, color=color.green, width=2)
+        label.new(int(math.avg(h1i, l0i)), h1, "MSB", color=color.new(color.black, 100), style=label.style_label_down, textcolor=color.green, size=size.small)
+        bu_ob = box.new(bu_ob_index, high[bu_ob_since], bar_index + 10, low[bu_ob_since], bgcolor=bu_ob_color, border_color=bu_ob_border_color, text="Bu-OB", text_color=bu_ob_text_color, text_halign=text.align_right, text_size=text_size)
+        bu_bb = box.new(bu_bb_index, high[bu_bb_since], bar_index + 10, low[bu_bb_since], bgcolor=bu_bb_color, border_color=bu_bb_border_color, text=l0 < l1 ? "Bu-BB" : "Bu-MB", text_color=bu_bb_text_color, text_halign=text.align_right, text_size=text_size)
+        array.push(bu_ob_boxes, bu_ob)
+        array.push(bu_bb_boxes, bu_bb)
+        if show_signals
+            label.new(bar_index, low, "BUY", yloc=yloc.belowbar, style=label.style_label_up, color=buy_color, textcolor=buy_text_color, size=signal_size)
+    if market == -1
+        line.new(l1i, l1, l0i, l1, color=color.red, width=2)
+        label.new(int(math.avg(l1i, h0i)), l1, "MSB", color=color.new(color.black, 100), style=label.style_label_up, textcolor=color.red, size=size.small)
+        be_ob = box.new(be_ob_index, high[be_ob_since], bar_index + 10, low[be_ob_since], bgcolor=be_ob_color, border_color=be_ob_border_color, text="Be-OB", text_color=be_ob_text_color, text_halign=text.align_right, text_size=text_size)
+        be_bb = box.new(be_bb_index, high[be_bb_since], bar_index + 10, low[be_bb_since], bgcolor=be_bb_color, border_color=be_bb_border_color, text=h0 > h1 ? "Be-BB" : "Be-MB", text_color=be_bb_text_color, text_halign=text.align_right, text_size=text_size)
+        array.push(be_ob_boxes, be_ob)
+        array.push(be_bb_boxes, be_bb)
+        if show_signals
+            label.new(bar_index, high, "SELL", yloc=yloc.abovebar, style=label.style_label_down, color=sell_color, textcolor=sell_text_color, size=signal_size)
+
+for bull_ob in bu_ob_boxes
+    bottom = box.get_bottom(bull_ob)
+    top = box.get_top(bull_ob)
+    if close < bottom
+        f_delete_box(bu_ob_boxes)
+    else if close < top
+        if zone_alerts
+            alert("Price in the BU-OB zone")
+    else
+        box.set_right(bull_ob, bar_index + 10)
+
+for bear_ob in be_ob_boxes
+    top = box.get_top(bear_ob)
+    bottom = box.get_bottom((bear_ob))
+    if close > top
+        f_delete_box(be_ob_boxes)
+    if close > bottom
+        if zone_alerts
+            alert("Price in the BE-OB zone")
+    else
+        box.set_right(bear_ob, bar_index + 10)
+
+for bear_bb in be_bb_boxes
+    top = box.get_top(bear_bb)
+    bottom = box.get_bottom(bear_bb)
+    if close > top
+        f_delete_box(be_bb_boxes)
+    else if close > bottom
+        if zone_alerts
+            alert("Price in the BE-BB zone")
+    else
+        box.set_right(bear_bb, bar_index + 10)
+
+for bull_bb in bu_bb_boxes
+    bottom = box.get_bottom(bull_bb)
+    top = box.get_top(bull_bb)
+    if close < bottom
+        f_delete_box(bu_bb_boxes)
+    else if close < top
+        if zone_alerts
+            alert("Price in the BU-BB zone")
+    else
+        box.set_right(bull_bb, bar_index + 10)
+
+
+alertcondition(ta.change(market) != 0, "MSB", "MSB")
+
+// ---------------------------------------------------------------------------
+//  TVMT BUY / SELL ALERT  (added)
+//
+//  market flips to 1 on a bullish structure break and to -1 on a bearish one,
+//  so those flips are the BUY and the SELL. They are read straight off the
+//  original engine - nothing here decides anything on its own.
+//
+//  freq_once_per_bar_close means exactly one message per signal, on the closed
+//  bar, so there is no frequency dropdown to get wrong when creating the alert.
+// ---------------------------------------------------------------------------
+msb_buy = ta.change(market) != 0 and market == 1
+msb_sell = ta.change(market) != 0 and market == -1
+
+if tvmt_on
+    if msb_buy
+        alert(f_tvmt_json("buy"), alert.freq_once_per_bar_close)
+    else if msb_sell
+        alert(f_tvmt_json("sell"), alert.freq_once_per_bar_close)
