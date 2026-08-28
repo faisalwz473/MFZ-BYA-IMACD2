@@ -96,6 +96,7 @@ G_TRD = "8 - Trend Meter Dashboard"
 G_SES = "9 - Session Panel"
 G_WIN = "10 - Win Rate Dashboard"
 G_CST = "10a - Execution Costs & Breakeven (Win Rate only)"
+G_LAD = "10b - Partial Exit Model (Win Rate only)"
 G_LAY = "11 - Dashboard Layout"
 
 // -----------------------------------------------------------------------------
@@ -277,6 +278,25 @@ beTrigMode = input.string("R multiple", "Breakeven Trigger Mode", options = ["R 
 beTrigR    = input.float(0.5, "Breakeven Trigger (R in profit)", minval = 0.1, maxval = 5.0, step = 0.1, group = G_CST, tooltip = "Only read when Trigger Mode = R multiple. 0.5 = arm halfway to TP1 when TP1 sits at 1R.", display = display.none)
 beTrigPips = input.float(20.0, "Breakeven Trigger (pips in profit)", minval = 0.1, step = 1.0, group = G_CST, tooltip = "Only read when Trigger Mode = Pips. Match your bridge's own 'trigger after pips profit' value.", display = display.none)
 beOffPips  = input.float(0.0, "Breakeven Offset (pips beyond entry)", minval = 0.0, step = 0.5, group = G_CST, tooltip = "Where the stop actually lands once armed. 0 = exactly at entry. A small positive offset locks in a token profit and matches bridges that offer an 'SL offset from entry' setting.", display = display.none)
+
+// -----------------------------------------------------------------------------
+//  10b. PARTIAL EXIT MODEL  (Win Rate scoring only - never signals)
+//
+//  Without this, every winner is booked at exactly TP1 no matter how far price
+//  actually ran. The dashboard has always COUNTED the TP2 and TP3 touches but
+//  never credited them any R, so a trade that reached 3R scored the same +1R as
+//  one that stalled at 1R. On a slower chart roughly a third of resolved trades
+//  reach 2R and near a fifth reach 3R, and all of that upside was invisible.
+//
+//  Switching this on scales out across the three targets instead: bank a slice
+//  at TP1, optionally move the stop on the remainder to breakeven, and let the
+//  rest run. Default OFF reproduces the single-exit numbers exactly.
+// -----------------------------------------------------------------------------
+ladderOn = input.bool(false, "Model Partial Exits (TP1 / TP2 / TP3)", group = G_LAD, tooltip = "OFF (default) closes 100% at TP1 - the original scoring, unchanged.\n\nON scales out at the three targets using the percentages below, so a trade that runs to TP3 finally earns what it actually made.\n\nMirror this with your bridge's own take-profit ladder, or the dashboard is measuring a strategy you are not trading.", display = display.none)
+ladPct1  = input.float(50.0, "Close At TP1 (%)", minval = 0.0, maxval = 100.0, step = 5.0, group = G_LAD, tooltip = "Banking a slice at TP1 takes that portion out of reach of the next reversal, which is where most of the damage happens.", display = display.none)
+ladPct2  = input.float(25.0, "Close At TP2 (%)", minval = 0.0, maxval = 100.0, step = 5.0, group = G_LAD, display = display.none)
+ladPct3  = input.float(25.0, "Close At TP3 (%)", minval = 0.0, maxval = 100.0, step = 5.0, group = G_LAD, tooltip = "The three percentages should total 100. Anything still open when the trade ends is closed at whatever level ended it, so a short total is scored rather than lost.", display = display.none)
+ladBE    = input.bool(true, "Move Stop To Breakeven After TP1", group = G_LAD, tooltip = "Applies to the remainder once TP1 is banked, using the Breakeven Offset from 10a. This is the version of breakeven worth having: the risk is already off the table, so protecting the runner costs nothing that a scratch would have saved.", display = display.none)
 
 // -----------------------------------------------------------------------------
 //  11. DASHBOARD LAYOUT
@@ -846,6 +866,9 @@ var float vS     = na       // ORIGINAL stop - never moves, defines risk
 var float vStop  = na       // working stop - may be moved to breakeven
 var float vRisk  = na       // entry-to-original-stop distance, fixed at entry
 var bool  vBEon  = false    // has the working stop been moved to breakeven?
+var float vRem   = 0.0      // fraction of the position still open (1.0 = full)
+var float vBank  = 0.0      // R already banked on the closed portions
+var bool  vBooked = false   // has this trade's R been added to sumR yet?
 var float v1     = na
 var float v2     = na
 var float v3     = na
@@ -887,44 +910,90 @@ if confirmed and vState != 0
     // ---- LIVE: score the trade against the working stop / TP -----------
     // Runs on the fill bar too, so a bar that sweeps through entry AND stop
     // is counted as the loss it would have been, never as a free fill.
+    //
+    // R accrues into vBank as each portion closes, and the whole trade is added
+    // to sumR exactly once, guarded by vBooked. With the ladder off, fr1 is
+    // 1.0 so the entire position closes at TP1 and vBank holds the same single
+    // figure the original engine produced.
     if vState == 2
+        float dirS = vDir == 1 ? 1.0 : -1.0
+        float fr1  = ladderOn ? ladPct1 / 100.0 : 1.0
+        float fr2  = ladderOn ? ladPct2 / 100.0 : 0.0
+        float fr3  = ladderOn ? ladPct3 / 100.0 : 0.0
+        float rr1  = math.abs(v1 - vE) / vRisk
+        float rr2  = math.abs(v2 - vE) / vRisk
+        float rr3  = math.abs(v3 - vE) / vRisk
+
         bool slHit = vDir == 1 ? low <= vStop : high >= vStop
         bool t1Hit = vDir == 1 ? high >= v1 : low <= v1
         bool t2Hit = vDir == 1 ? high >= v2 : low <= v2
         bool t3Hit = vDir == 1 ? high >= v3 : low <= v3
         bool slFirst = slHit and t1Hit ? math.abs(open - vStop) <= math.abs(open - v1) : slHit
+
         if not vDone
             if slHit and not (t1Hit and not slFirst)
                 // Signed R of the stop that was actually hit. With the original
                 // stop this is exactly -1R; with the stop moved to breakeven it
                 // is ~0R (or slightly positive when an offset is set).
-                float rOut = (vStop - vE) / vRisk * (vDir == 1 ? 1.0 : -1.0)
-                cRes += 1
+                vBank += vRem * ((vStop - vE) / vRisk * dirS)
+                vRem  := 0.0
+                cRes  += 1
                 if vBEon
                     cBE += 1
                 else
                     cLoss += 1
                     cSL   += 1
-                sumR   += rOut - costR
-                vDone  := true
-                vWin   := false
-                vState := 0
+                vDone := true
+                vWin  := false
             else if t1Hit
-                cRes += 1
-                cWin += 1
-                c1   += 1
-                sumR += math.abs(v1 - vE) / vRisk - costR
+                vBank += math.min(fr1, vRem) * rr1
+                vRem  := vRem - math.min(fr1, vRem)
+                cRes  += 1
+                cWin  += 1
+                c1    += 1
                 vDone := true
                 vWin  := true
-        if vState == 2 and vDone and vWin
+                // The risk is already off the table on the banked slice, so
+                // protecting the runner here costs nothing a scratch would have
+                // saved - unlike a pre-TP1 breakeven, which trades winners away.
+                if ladderOn and ladBE
+                    vBEon := true
+                    vStop := vE + dirS * beOffPips * pipPrice
+
+        if vDone and vWin
             if t2Hit and not v2Hit
                 v2Hit := true
                 c2 += 1
+                if vRem > 0.0001
+                    vBank += math.min(fr2, vRem) * rr2
+                    vRem  := vRem - math.min(fr2, vRem)
             if t3Hit and not v3Hit
                 v3Hit := true
                 c3 += 1
-            if t3Hit or slHit
-                vState := 0
+                if vRem > 0.0001
+                    vBank += math.min(fr3, vRem) * rr3
+                    vRem  := vRem - math.min(fr3, vRem)
+            // Whatever is still open when the runner's stop is hit closes there.
+            if vRem > 0.0001 and slHit
+                vBank += vRem * ((vStop - vE) / vRisk * dirS)
+                vRem  := 0.0
+
+        // Book once, the moment the position is fully closed.
+        if vDone and vRem <= 0.0001 and not vBooked
+            sumR    += vBank - costR
+            vBooked := true
+
+        // Stop tracking on a loss immediately; on a win keep going so the TP2
+        // and TP3 touch counters stay accurate. Anything still open at that
+        // point is closed at whichever level ended the trade.
+        if vDone and (not vWin or t3Hit or slHit)
+            if vRem > 0.0001
+                vBank += vRem * (t3Hit ? rr3 : ((vStop - vE) / vRisk * dirS))
+                vRem  := 0.0
+                if not vBooked
+                    sumR    += vBank - costR
+                    vBooked := true
+            vState := 0
 
         // ---- Arm breakeven for the NEXT bar --------------------------------
         // Deliberately evaluated AFTER this bar has been scored. Within a single
@@ -943,10 +1012,17 @@ if newSetup
     // A LIVE trade that never reached its stop or TP1 is closed at this bar
     // rather than silently discarded, and booked at the R it had actually
     // reached, less the same round-turn cost every other outcome pays.
-    if vState == 2 and not vDone
+    if vState == 2 and not vBooked
         float cutRisk = math.max(nz(vRisk, pipPrice), pipPrice)
-        cCut    += 1
-        sumCutR += (close - vE) / cutRisk * (vDir == 1 ? 1.0 : -1.0) - f_costR(cutRisk)
+        float cutR    = vBank + vRem * ((close - vE) / cutRisk * (vDir == 1 ? 1.0 : -1.0)) - f_costR(cutRisk)
+        if vDone
+            // Already resolved as a win at TP1 - only a ladder runner is still
+            // open. Book it, but it is not a Cut: the trade had its outcome.
+            sumR += cutR
+        else
+            cCut    += 1
+            sumCutR += cutR
+        vBooked := true
     if vState == 1
         cExpired += 1          // an unfilled limit cancelled by the next signal
     cSignals += 1
@@ -956,6 +1032,9 @@ if newSetup
     vStop  := pSL
     vRisk  := math.max(math.abs(pEntry - pSL), pipPrice)
     vBEon  := false
+    vRem   := 1.0
+    vBank  := 0.0
+    vBooked := false
     v1     := pTP1
     v2     := pTP2
     v3     := pTP3
@@ -1092,7 +1171,7 @@ bool   filtBlocking = minAligned > 0 and upCount < minAligned and dnCount < minA
 color  filtBg  = minAligned == 0 ? trNeCol : filtBlocking ? trDnCol : trUpCol
 
 // Header tag so a screenshot always states which scoring model produced it.
-string winMode = distMethod + (beModel ? " + BE" : "") + (costPips > 0 ? " NET" : " GROSS")
+string winMode = distMethod + (beModel ? " + BE" : "") + (ladderOn ? " + LAD" : "") + (costPips > 0 ? " NET" : " GROSS")
 
 var table tTrend = table.new(f_pos(posTrend), 3, 7, bgcolor = transparent, border_width = 0, frame_width = 0)
 var table tSess  = table.new(f_pos(posSess),  5, 7, bgcolor = transparent, border_width = 0, frame_width = 0)

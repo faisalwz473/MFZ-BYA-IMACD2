@@ -169,6 +169,26 @@ strategy from the one being traded.
 Expect `Wins` to fall as `Breakeven` rises. That is the mechanism working, not a
 worse strategy. Compare Expectancy.
 
+### Partial exits (group 10b)
+Without this, every winner is booked at exactly TP1 no matter how far price ran.
+The dashboard always *counted* the TP2/TP3 touches but never credited them any R,
+so a trade that reached 3R scored the same +1R as one that stalled at 1R. On a
+slower gold chart roughly a third of resolved trades reach 2R and near a fifth
+reach 3R — all of that upside was invisible.
+
+`Model Partial Exits` scales out across the three targets instead. `Move Stop To
+Breakeven After TP1` protects the remainder using the offset from 10a.
+
+Note the difference between the two breakeven models. A **pre-TP1** breakeven
+(group 10a) trades winners away for scratch protection and measured out as
+roughly a wash. A **post-TP1** breakeven costs nothing a scratch would have
+saved, because the risk is already off the table on the banked slice.
+
+Cost is charged once per trade, so a multi-exit trade is scored slightly
+optimistically — each partial close pays its own spread in reality.
+
+Default OFF reproduces the single-exit numbers exactly.
+
 ### Reading the table
 `Resolved (SL/BE/TP1)` = `Wins` + `Losses` + `Breakeven`. The header cell tags
 every screenshot with the scoring model that produced it — distance method, `+ BE`
