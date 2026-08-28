@@ -68,6 +68,7 @@ sell_color = input.color(color.red, "SELL", group=signal_settings, inline="sell"
 sell_text_color = input.color(color.white, "Text", group=signal_settings, inline="sell")
 signal_size = input.string(size.small, "Label Size", [size.tiny, size.small, size.normal, size.large], group=signal_settings)
 signal_mode = input.string("Zone Rejection", "Signal Trigger", ["Zone Rejection", "Structure Break (original)"], group=signal_settings, tooltip="Zone Rejection: price must first trade INTO a zone, then the first candle that closes back out of it in the zone's own direction is the signal - an up candle closing above a green box is a BUY, a down candle closing below a red box is a SELL. This is the retest entry.\n\nStructure Break (original): fires the moment market structure flips, with no retest. Kept so the two can be compared.")
+zone_touch = input.string("Wick Touches Zone", "Zone Contact", ["Wick Touches Zone", "Close Inside Zone"], group=signal_settings, tooltip="Wick Touches Zone (default): the bar's RANGE only has to reach into the zone, and the signal is that same bar closing back out of it. This is the single rejection candle - price pokes the zone and is thrown back.\n\nClose Inside Zone: price must actually CLOSE inside the zone on one bar and close back out on a later one. Much stricter, and at resistance it rarely triggers at all, because a rejection candle usually wicks the zone and closes below it.")
 zone_kind = input.string("Both", "Zones Used For Signals", ["Both", "Order Blocks only", "Breaker Blocks only"], group=signal_settings, tooltip="Which boxes count as a zone: the Bu-OB / Be-OB order blocks, the Bu-BB / Be-BB breaker blocks, or both.")
 
 // ---------------------------------------------------------------------------
@@ -166,7 +167,8 @@ f_tvmt_json(action) =>
 // outer edges of the box(es) it is in? The na guard matters: array.new_box(5)
 // pre-fills five na boxes that box.get_top() would throw on.
 f_zone_scan(box_arr) =>
-    bool inside = false
+    bool inside = false      // the CLOSE sits within the box
+    bool touched = false     // the bar's RANGE reaches into the box
     float t = na
     float b = na
     if array.size(box_arr) > 0
@@ -175,11 +177,13 @@ f_zone_scan(box_arr) =>
             if not na(bx)
                 float bx_t = box.get_top(bx)
                 float bx_b = box.get_bottom(bx)
-                if close <= bx_t and close >= bx_b
-                    inside := true
+                if low <= bx_t and high >= bx_b
+                    touched := true
                     t := na(t) ? bx_t : math.max(t, bx_t)
                     b := na(b) ? bx_b : math.min(b, bx_b)
-    [inside, t, b]
+                if close <= bx_t and close >= bx_b
+                    inside := true
+    [inside, touched, t, b]
 
 
 [h0, h0i] = f_get_high(0)
@@ -272,14 +276,12 @@ if ta.change(market) != 0
 use_ob = zone_kind != "Breaker Blocks only"
 use_bb = zone_kind != "Order Blocks only"
 
-[in_bu_ob, bu_ob_t, bu_ob_b] = f_zone_scan(bu_ob_boxes)
-[in_bu_bb, bu_bb_t, bu_bb_b] = f_zone_scan(bu_bb_boxes)
-[in_be_ob, be_ob_t, be_ob_b] = f_zone_scan(be_ob_boxes)
-[in_be_bb, be_bb_t, be_bb_b] = f_zone_scan(be_bb_boxes)
+[cl_bu_ob, tc_bu_ob, bu_ob_t, bu_ob_b] = f_zone_scan(bu_ob_boxes)
+[cl_bu_bb, tc_bu_bb, bu_bb_t, bu_bb_b] = f_zone_scan(bu_bb_boxes)
+[cl_be_ob, tc_be_ob, be_ob_t, be_ob_b] = f_zone_scan(be_ob_boxes)
+[cl_be_bb, tc_be_bb, be_bb_t, be_bb_b] = f_zone_scan(be_bb_boxes)
 
-in_bull_zone = (use_ob and in_bu_ob) or (use_bb and in_bu_bb)
-in_bear_zone = (use_ob and in_be_ob) or (use_bb and in_be_bb)
-
+// Edges of whichever zones this bar reached into.
 bull_t_ob = use_ob ? bu_ob_t : na
 bull_t_bb = use_bb ? bu_bb_t : na
 bull_zone_top = na(bull_t_ob) ? bull_t_bb : na(bull_t_bb) ? bull_t_ob : math.max(bull_t_ob, bull_t_bb)
@@ -288,22 +290,39 @@ bear_b_ob = use_ob ? be_ob_b : na
 bear_b_bb = use_bb ? be_bb_b : na
 bear_zone_bot = na(bear_b_ob) ? bear_b_bb : na(bear_b_bb) ? bear_b_ob : math.min(bear_b_ob, bear_b_bb)
 
-// Remember the edge while price is still in the zone - by the bar it breaks
-// out, the scan no longer reports the box it just left.
+touch_bull = (use_ob and tc_bu_ob) or (use_bb and tc_bu_bb)
+touch_bear = (use_ob and tc_be_ob) or (use_bb and tc_be_bb)
+close_bull = (use_ob and cl_bu_ob) or (use_bb and cl_bu_bb)
+close_bear = (use_ob and cl_be_ob) or (use_bb and cl_be_bb)
+
+// --- Wick mode: the rejection is one candle -------------------------------
+// The bar reaches into the zone and closes back out of it the zone's way. This
+// is what a rejection at resistance actually looks like - the close is almost
+// never inside, only the wick is.
+wick_buy = touch_bull and close > open and not na(bull_zone_top) and close > bull_zone_top
+wick_sell = touch_bear and close < open and not na(bear_zone_bot) and close < bear_zone_bot
+
+// --- Close mode: the stricter two-bar version -----------------------------
+// The edge has to be remembered, because by the bar price breaks out the scan
+// no longer reports the box it just left.
 var float held_bull_top = na
 var float held_bear_bot = na
-if in_bull_zone
+if close_bull
     held_bull_top := bull_zone_top
-if in_bear_zone
+if close_bear
     held_bear_bot := bear_zone_bot
 
-bull_reject = in_bull_zone[1] and not in_bull_zone and close > open and not na(held_bull_top) and close > held_bull_top
-bear_reject = in_bear_zone[1] and not in_bear_zone and close < open and not na(held_bear_bot) and close < held_bear_bot
+close_buy = close_bull[1] and not close_bull and close > open and not na(held_bull_top) and close > held_bull_top
+close_sell = close_bear[1] and not close_bear and close < open and not na(held_bear_bot) and close < held_bear_bot
 
-if bull_reject
+if close_buy
     held_bull_top := na
-if bear_reject
+if close_sell
     held_bear_bot := na
+
+wick_mode = zone_touch == "Wick Touches Zone"
+bull_reject = wick_mode ? wick_buy : close_buy
+bear_reject = wick_mode ? wick_sell : close_sell
 
 zone_mode = signal_mode == "Zone Rejection"
 buy_signal = zone_mode ? bull_reject : (ta.change(market) != 0 and market == 1)
