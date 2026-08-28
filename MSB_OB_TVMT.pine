@@ -77,6 +77,7 @@ zone_kind = input.string("Both", "Zones Used For Signals", ["Both", "Order Block
 tvmt_settings = "TVMT Alerts"
 tvmt_on = input.bool(true, "Send BUY / SELL Alerts To TVMT", group=tvmt_settings, tooltip="Silences the webhook without deleting the alert. Remember TradingView froze this setting into the alert when you created it — changing it here only affects a NEWLY created alert.")
 sym_override = input.string("", "Webhook Symbol Override", group=tvmt_settings, tooltip="Leave empty to send the chart's own ticker. A TVC:GOLD chart sends \"GOLD\", which will not match a broker account trading XAUUSD — type the broker's exact symbol here to send that instead. Only needed if TVMT's auto-detect misses.")
+alert_intrabar = input.bool(true, "Fire Alert Intrabar (do not wait for bar close)", group=tvmt_settings, tooltip="ON: the alert fires the moment the condition first becomes true inside the bar - TradingView's \"once per bar\" behaviour. Faster entry, which matters when the target is small.\n\nThe cost is that the signal can un-happen. The condition reads the LIVE close, so price can be above the zone on a green candle when the alert fires and back below by the time the bar shuts. The trade is open; the chart label is gone. You saw the mirror image of this earlier - a label with no trade - and this is the same thing from the other side.\n\nOFF: fires only on a closed bar. What prints is what traded.\n\nNote the Win Rate dashboard can only ever replay closed bars, so with this ON it measures a slightly different strategy from the one being traded."
 zone_alerts = input.bool(false, "Also Send Order Block Zone Alerts", group=tvmt_settings, tooltip="OFF by default, and it should stay off on any alert wired to a trading webhook.\n\nThese four alerts send PLAIN TEXT (\"Price in the BU-OB zone\"), not JSON, and TradingView's \"Any alert() function call\" condition fires on every alert() in the script — so they go to the same webhook as your trades. They also test a LEVEL rather than an edge, so they fire on every bar while price sits inside a box.\n\nTurn on only for a separate, notification-only alert.")
 
 bu_ob_inline_color = "Bu-OB Colors"
@@ -387,14 +388,24 @@ alertcondition(ta.change(market) != 0, "MSB", "MSB")
 //  Fires whichever trigger "Signal Trigger" selects, so the webhook and the
 //  chart label can never disagree about what a signal is.
 //
-//  freq_once_per_bar_close means exactly one message per signal, on the closed
-//  bar, so there is no frequency dropdown to get wrong when creating the alert.
+//  The frequency is set here, not in the alert dialog, so there is no dropdown
+//  to get wrong when creating the alert. Either way it is at most one message
+//  per bar - intrabar fires on the first tick that satisfies the condition,
+//  bar-close waits for the bar to shut.
 // ---------------------------------------------------------------------------
+// The freq argument has to be a compile-time constant, so the two frequencies
+// need separate alert() calls rather than a variable.
 if tvmt_on
     if buy_signal
-        alert(f_tvmt_json("buy"), alert.freq_once_per_bar_close)
+        if alert_intrabar
+            alert(f_tvmt_json("buy"), alert.freq_once_per_bar)
+        else
+            alert(f_tvmt_json("buy"), alert.freq_once_per_bar_close)
     else if sell_signal
-        alert(f_tvmt_json("sell"), alert.freq_once_per_bar_close)
+        if alert_intrabar
+            alert(f_tvmt_json("sell"), alert.freq_once_per_bar)
+        else
+            alert(f_tvmt_json("sell"), alert.freq_once_per_bar_close)
 
 
 // ===========================================================================
