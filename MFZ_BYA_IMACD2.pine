@@ -17,16 +17,28 @@
 //   2. A signal is only accepted when the bar has CLOSED (barstate.isconfirmed),
 //      so a printed arrow can never disappear again -> no repainting.
 //   3. On that closed bar we capture Entry / SL / TP1 / TP2 / TP3 prices,
-//      draw them, and feed them to five hidden plots that the alert reads.
-//   4. The alert message is pure JSON built from {{plot("title")}} placeholders,
-//      so TVMT always receives raw numbers in the exact expected field names.
+//      draw them, and feed them to five data-window plots the alert reads.
+//   4. The alert message is pure JSON, so TVMT always receives raw numbers in
+//      the exact expected field names.
 //
-//  ALERT SETUP (do this once in TradingView)
+//  ALERT SETUP (do this once in TradingView) - recommended path
+//   Settings -> Alerts -> Alert Method = "One alert (alert function)"
+//   If the MT4/MT5 Market Watch name differs from the chart ticker, also set
+//   Settings -> Alerts -> Broker Symbol Override (e.g. chart GOLD -> XAUUSD).
 //   Right-click chart -> Add alert -> Condition: "BYA IMACD1"
-//   -> choose "MFZ BUY (TVMT)" or "MFZ SELL (TVMT)"
+//   -> choose "Any alert() function call"
 //   -> Trigger: "Once Per Bar Close"
-//   -> The Message box is pre-filled with the JSON. Do not edit it.
+//   -> Leave the Message box alone; Pine sends its own JSON.
 //   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
+//
+//  Alternative: Alert Method = "Two alerts", condition "MFZ BUY (TVMT)" /
+//  "MFZ SELL (TVMT)", message pre-filled from {{plot()}} placeholders. That
+//  path sends {{ticker}} verbatim, so the Broker Symbol Override does NOT
+//  apply to it.
+//
+//  "Webhook successfully delivered" in TradingView only means the bridge
+//  answered 2xx. It is not proof that the terminal received or accepted the
+//  trade - see the troubleshooting table in README.md.
 // =============================================================================
 
 indicator(title = "BYA IMACD1", shorttitle = "BYA IMACD1", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
@@ -122,7 +134,8 @@ labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small"
 // -----------------------------------------------------------------------------
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
-alertMode  = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALERT, tooltip = "Two alerts: create one alert per condition. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker. Immune to the double-fire problem.", display = display.none)
+alertMode  = input.string("One alert (alert function)", "Alert Method", options = ["One alert (alert function)", "Two alerts (BUY and SELL separately)"], group = G_ALERT, tooltip = "One alert (recommended): create a single alert on 'Any alert() function call'. Pine builds the JSON itself, so the numbers can never come through as NaN and the Broker Symbol override below is applied. Exactly one payload per signal.\nTwo alerts: one alert per condition, message pre-filled from {{plot()}} placeholders. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both, and {{ticker}} is sent as-is so the broker symbol cannot be overridden.", display = display.none)
+brokerSym  = input.string("", "Broker Symbol Override", group = G_ALERT, tooltip = "Leave empty to send the chart ticker (e.g. GOLD). Set this to the symbol EXACTLY as it appears in the MT4/MT5 Market Watch (XAUUSD, GOLD.a, XAUUSDm, ...) when the two names differ. Type it with no leading or trailing space. The terminal matches the payload symbol literally: one character out and the EA finds no symbol and does nothing, while TradingView still reports the webhook as delivered. Applies to the 'One alert' method only.", display = display.none)
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
@@ -413,14 +426,20 @@ if sellSignal
 
 // =============================================================================
 //  ALERT PLOTS - read by {{plot("title")}}, matched by TITLE not by number.
-//  display.none keeps them off the chart; TradingView still feeds them to the
-//  alert placeholders. nz(..., close) guarantees a finite number, never na.
+//  These use display.data_window, NOT display.none. A plot hidden with
+//  display.none is removed from every output surface, and {{plot("entry")}}
+//  then resolves to NaN (or to nothing at all), which turns the webhook body
+//  into invalid JSON - the bridge answers 200, TradingView reports "webhook
+//  successfully delivered", and the terminal silently discards the order.
+//  display.data_window keeps them off the chart pane, the price scale and the
+//  status line exactly as before, while still feeding the placeholders.
+//  nz(..., close) guarantees a finite number, never na.
 // =============================================================================
-plot(nz(pEntry, close), title = "entry", display = display.none)
-plot(nz(pSL,    close), title = "sl",    display = display.none)
-plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
-plot(nz(pTP2,   close), title = "tp2",   display = display.none)
-plot(nz(pTP3,   close), title = "tp3",   display = display.none)
+plot(nz(pEntry, close), title = "entry", display = display.data_window)
+plot(nz(pSL,    close), title = "sl",    display = display.data_window)
+plot(nz(pTP1,   close), title = "tp",    display = display.data_window)   // "tp" carries TP1
+plot(nz(pTP2,   close), title = "tp2",   display = display.data_window)
+plot(nz(pTP3,   close), title = "tp3",   display = display.data_window)
 
 // =============================================================================
 //  TVMT WEBHOOK ALERTS - exact JSON, nothing else in the message box.
@@ -437,9 +456,12 @@ alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": 
 //  its "action" always matches the marker on the chart.
 //  Set the alert up as: Condition "BYA IMACD1" -> "Any alert() function call".
 // -----------------------------------------------------------------------------
+// The symbol the terminal must match. Falls back to the chart ticker.
+alertSym = str.length(brokerSym) > 0 ? brokerSym : syminfo.ticker
+
 f_json(string action) =>
     string j = '{\n'
-    j += '  "symbol": "' + syminfo.ticker + '",\n'
+    j += '  "symbol": "' + alertSym + '",\n'
     j += '  "action": "' + action + '",\n'
     j += '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
     j += '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
@@ -447,7 +469,7 @@ f_json(string action) =>
     j += '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
     j += '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
     j += '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
-    j += '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
+    j += '  "tv_alert_id": "tv-' + alertSym + '-' + action + '-' + str.tostring(time) + '"\n'
     j += '}'
     j
 

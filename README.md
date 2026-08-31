@@ -30,29 +30,65 @@ Three other modes are selectable in Settings:
 - Every input uses `display = display.none`, so the chart status line shows only the indicator name.
 
 ## Alert setup (TVMT webhook)
-1. Right-click the chart → **Add alert**
-2. Condition: **MFZ BYA IMACD2** → pick **MFZ BUY (TVMT)** or **MFZ SELL (TVMT)**
-3. Trigger: **Once Per Bar Close**
-4. Leave the pre-filled JSON message exactly as it is — do not add any text
-5. Notifications tab → **Webhook URL** → paste your TVMT bridge URL
 
-Alert payload (values arrive as raw numbers via `{{plot("title")}}`):
+**Recommended — one alert, built by Pine.** This is the default and it cannot send `NaN`,
+cannot fire BUY and SELL on the same cross, and is the only path where the broker symbol
+can be overridden.
+
+1. Indicator **Settings → 6 - Alerts → Alert Method** = `One alert (alert function)`
+2. If your MT4/MT5 Market Watch name differs from the chart ticker, set
+   **Broker Symbol Override** in the same group (chart `GOLD` → terminal `XAUUSD`, `GOLD.a`, `XAUUSDm`, …)
+3. Right-click the chart → **Add alert**
+4. Condition: **BYA IMACD1** → **Any alert() function call**
+5. Trigger: **Once Per Bar Close**
+6. Leave the Message box alone — Pine sends its own JSON
+7. Notifications tab → **Webhook URL** → paste your TVMT bridge URL
+
+**Alternative — two alerts, `{{plot()}}` placeholders.** Condition **MFZ BUY (TVMT)** or
+**MFZ SELL (TVMT)**, message pre-filled, do not edit it. This path sends `{{ticker}}`
+verbatim, so **Broker Symbol Override does not apply to it**, and both alerts must be
+created with identical indicator settings or a single cross can trigger both.
+
+`"tp"` carries TP1. On the placeholder path the levels are matched by plot **title**,
+not by number, so plot order can never break the webhook.
+
+Alert payload (identical on both paths):
 
 ```json
 {
-  "symbol": "{{ticker}}",
+  "symbol": "XAUUSD",
   "action": "buy",
-  "entry": {{plot("entry")}},
-  "sl": {{plot("sl")}},
-  "tp": {{plot("tp")}},
-  "tp2": {{plot("tp2")}},
-  "tp3": {{plot("tp3")}},
-  "tv_time": "{{timenow}}",
-  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"
+  "entry": 4447.20,
+  "sl": 4432.20,
+  "tp": 4462.20,
+  "tp2": 4477.20,
+  "tp3": 4492.20,
+  "tv_time": "2026-08-31T21:05:00Z",
+  "tv_alert_id": "tv-XAUUSD-buy-1756672500000"
 }
 ```
 
-`"tp"` carries TP1. Levels are matched by plot **title**, not by number, so plot order can never break the webhook.
+## "Webhook successfully delivered" but the terminal did nothing
+
+That green line in TradingView means only one thing: **TradingView sent the POST and the
+bridge answered 2xx.** It is not an acknowledgement from MT4/MT5. Every failure below
+still shows as "successfully delivered". Work down the list — the first two cover almost
+every case.
+
+| # | Cause | How to confirm | Fix |
+|---|-------|----------------|-----|
+| 1 | **Symbol name mismatch.** The payload says `"symbol": "GOLD"`, the terminal's Market Watch says `XAUUSD` / `GOLD.a` / `XAUUSDm`. The EA looks the name up literally, finds nothing, and exits without logging a trade. | Open Market Watch (Ctrl+M) and compare, character for character, with the `symbol` field in the alert log | Set **Broker Symbol Override** to the exact Market Watch name (Alert Method must be `One alert`) |
+| 2 | **Numbers arrived as `NaN`.** `{{plot("entry")}}` only resolves for a plot that is still an output. Hidden with `display.none` it returns `NaN`, the body stops being valid JSON, the bridge still answers 200. | Look at the delivered body in the TradingView alert log — any `NaN`, blank, or literal `{{plot("entry")}}` | Fixed in this version: the five alert plots now use `display.data_window`. Re-add the indicator so the alert picks up the new outputs |
+| 3 | **Alert built on the wrong condition.** An alert on "Any alert() function call" while Alert Method is `Two alerts` (or the reverse) fires the bell and sends nothing usable. | Alert's Condition line vs. the Alert Method input | Match them per the setup steps above |
+| 4 | **AutoTrading is off**, or the EA shows a sad face / no smiley on the chart | Toolbar AutoTrading button; the EA's face on the chart corner | Enable AutoTrading, allow algo trading in the EA properties |
+| 5 | **Bridge URL not allow-listed in the terminal** (only applies to bridges the EA polls over HTTP) | Tools → Options → Expert Advisors → Allow WebRequest for listed URL | Add the bridge URL there |
+| 6 | **The EA is not on a chart**, or is on a chart of a different symbol than the payload | Terminal → Experts tab, and the chart the EA sits on | Attach the EA and leave that chart open |
+| 7 | **Market closed / trading disabled for the symbol** at the moment of the alert | Journal tab, "market closed" or "trade disabled" | Nothing to fix in the script |
+| 8 | **Bridge received it but rejected it** (missing required field, bad auth key, unknown action) | The bridge's own log, not TradingView's | Align the payload with what your bridge expects |
+
+Check the terminal's **Journal** and **Experts** tabs at the alert timestamp. If neither
+shows a single line at that moment, the request never reached the terminal and the fault
+is between the bridge and MT — not in the indicator.
 
 ## Why the markers are labels, not plotshapes
 TradingView allows a maximum of **64 plot outputs per script**, and a `plotshape()` with a
