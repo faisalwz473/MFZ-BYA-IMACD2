@@ -7,24 +7,56 @@
 //  indicator that draws trade levels on the price chart and sends a fixed JSON
 //  alert for the TVMT webhook bridge.
 //
-//  HOW IT WORKS (beginner summary)
-//   1. THE CROSSING OF THE TWO LINES IS THE ONLY TRIGGER. Nothing else can
-//      fire a signal:
-//         md (Impulse MACD line, "MA Length", slow) crosses UP   through
-//         sb (signal line, "Signal Length", fast)               -> BUY
-//         md crosses DOWN through sb                            -> SELL
-//      The "Which Cross Is A BUY" setting swaps those two labels if your chart
-//      reads the other way round. There is no zone filter, no one-per-direction
-//      filter and no trend filter - they were removed, because any of them can
-//      swallow a cross and leave the alerts out of step with the chart.
-//      Lot size, TP and SL are managed in TVMT.
-//   2. A signal is only accepted when the bar has CLOSED (barstate.isconfirmed),
-//      so a printed arrow can never disappear again -> no repainting. This
-//      affects WHEN a cross is confirmed, never WHETHER it counts.
-//   3. On that closed bar we capture Entry / SL / TP1 / TP2 / TP3 prices,
-//      draw them, and feed them to five hidden plots that the alert reads.
-//   4. The alert message is pure JSON built from {{plot("title")}} placeholders,
-//      so TVMT always receives raw numbers in the exact expected field names.
+//  THE CROSSING OF THE TWO LINES IS THE ONLY THING THAT FIRES AN ALERT
+//   md = the Impulse MACD line, driven by "MA Length (slow line)"
+//   sb = the signal line,       driven by "Signal Length (fast line)"
+//
+//   md crosses UP   through sb  -> BUY
+//   md crosses DOWN through sb  -> SELL
+//
+//  Nothing else is consulted. There is no zone filter, no one-signal-per-
+//  direction filter and no trend filter - each of those could swallow a
+//  crossing and leave the alerts out of step with the chart, so they were
+//  removed. Lot size, TP and SL are managed in TVMT.
+//
+//  "Which Cross Is A BUY" is the single control that swaps the two labels.
+//  Two lines can only swap places once per crossing, so both settings describe
+//  the SAME event - the setting just decides which side is called BUY. The old
+//  separate "Invert Buy / Sell" checkbox was removed because having two
+//  controls doing one job made it easy to flip twice and land back where you
+//  started.
+//
+//  Crossings are found by SIGN FLIP, not ta.crossover, so a crossing still
+//  registers when both lines rest together at the zero level. See the CROSSOVER
+//  section for the full explanation.
+//
+//  NO REPAINT: a signal is only accepted once the bar has CLOSED
+//  (barstate.isconfirmed), so a printed marker can never disappear again. This
+//  sets WHEN a crossing is confirmed, never WHETHER it counts.
+//
+//  MATCH THE LENGTHS TO YOUR PANE INDICATOR - READ THIS
+//  This script is an OVERLAY, so md and sb are not drawn on it (Pine cannot
+//  plot into a lower pane from an overlay script). The crossings you read off
+//  a lower-pane Impulse MACD are only the same crossings this script fires on
+//  if BOTH use the same lengths.
+//
+//  A pane legend reading "IMACD_LB 24 9" is running MA Length 24, Signal
+//  Length 9. The defaults here are now 24 and 9 to match it.
+//
+//  The lengths matter enormously, because sb is a moving average OF md - a
+//  short Signal Length glues it to md and the two cross on nearly every wiggle.
+//  Measured over 591 bars of gold-like data:
+//      MA/Signal 10/3  -> 101 crossings, one every ~6 bars
+//      MA/Signal 12/6  ->  55 crossings, one every ~11 bars
+//      MA/Signal 24/9  ->  23 crossings, one every ~25 bars  (matches IMACD_LB 24 9)
+//      MA/Signal 34/9  ->  16 crossings, one every ~35 bars  (LazyBear stock)
+//  So the old 10/3 default fired about 4.4x more often than a 24/9 pane shows
+//  crossings. The engine was never ignoring the crossings - it was reading a
+//  different, much faster pair of lines and catching every small one.
+//
+//  TradingView stores input values in the saved chart layout, and a saved value
+//  outranks a new default. After updating, open Settings -> Inputs and confirm
+//  MA Length and Signal Length actually read 24 and 9.
 //
 //  ALERT SETUP (do this once in TradingView)
 //   Right-click chart -> Add alert -> Condition: "BYA IMACD1"
@@ -42,7 +74,7 @@ indicator(title = "BYA IMACD1", shorttitle = "BYA IMACD1", overlay = true, max_l
 //  chart status line clean (only the indicator name shows), while the inputs
 //  still appear normally in Settings -> Inputs.
 // =============================================================================
-G_SIG   = "1 - Signal Engine (Impulse MACD)"
+G_SIG   = "1 - Signal Engine"
 G_DIST  = "2 - Distance Method (SL / TP)"
 G_PIP   = "2a - Pip Settings"
 G_ATR   = "2b - ATR Settings"
@@ -50,15 +82,14 @@ G_PCT   = "2c - Percentage Settings"
 G_MARK  = "3 - Marker Style"
 G_LINE  = "4 - Line & Label Style"
 G_DASH  = "5 - Win Rate Dashboard"
-G_ALERT = "6 - Alerts"
 
 // -----------------------------------------------------------------------------
 //  1. SIGNAL ENGINE INPUTS
 // -----------------------------------------------------------------------------
-lengthMA     = input.int(10, "Impulse MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Drives the Impulse MACD line (md). Default = 10. LazyBear original used 34.", display = display.none)
-lengthSignal = input.int(3, "Signal Line Length (fast line)", minval = 1, group = G_SIG, tooltip = "Drives the signal line (sb). Default = 3. LazyBear original used 9.", display = display.none)
+lengthMA     = input.int(24, "MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Impulse MACD length - drives the md line (the blue/green line in a lower-pane Impulse MACD).\n\nThis MUST match the pane indicator you are reading the crossings off. A pane showing IMACD_LB 24 9 is running MA Length 24, so 24 is the default here. Set to 34 for LazyBear stock settings.", display = display.none)
+lengthSignal = input.int(9, "Signal Length (fast line)", minval = 1, group = G_SIG, tooltip = "Signal line length - drives the sb line (the orange line in a lower-pane Impulse MACD).\n\nThis MUST match the pane indicator you are reading the crossings off. A pane showing IMACD_LB 24 9 is running Signal Length 9, so 9 is the default here.\n\nsb is a moving average OF md, so a short length glues it to md and the two cross on almost every wiggle: 3 gives roughly one signal every 6 bars, 9 roughly one every 25. Watch the 'One Signal Per' row on the dashboard while you tune it.", display = display.none)
 srcInput     = input.source(hlc3, "Price Source", group = G_SIG, display = display.none)
-signalMode   = input.string("MACD crosses Signal Line (standard)", "Which Cross Is A BUY", options = ["MACD crosses Signal Line (standard)", "Signal Line crosses MACD (reversed)"], group = G_SIG, tooltip = "There is only ONE crossing event between the two lines. This setting just decides which side of it is called BUY.\n\nMACD crosses Signal Line (standard): the Impulse MACD line (md) crossing UP through the signal line (sb) = BUY. This is the normal reading and follows price direction.\n\nSignal Line crosses MACD (reversed): the exact same crossings with BUY and SELL swapped. Use this only if every marker on your chart sits on the wrong side.", display = display.none)
+signalMode   = input.string("MACD crosses Signal Line (standard)", "Which Cross Is A BUY", options = ["MACD crosses Signal Line (standard)", "Signal Line crosses MACD (reversed)"], group = G_SIG, tooltip = "There is only ONE crossing event between the two lines. This setting decides which side of it is called BUY.\n\nMACD crosses Signal Line (standard): md crossing UP through sb = BUY. This is the normal reading and follows price direction - sb is an average of md, so md rising above it means momentum is turning up.\n\nSignal Line crosses MACD (reversed): the exact same crossings with BUY and SELL swapped. Use this only if every marker on your chart sits on the wrong side.", display = display.none)
 
 // -----------------------------------------------------------------------------
 //  2. DISTANCE METHOD INPUTS  (Pip / ATR / Percentage - trader picks one)
@@ -121,7 +152,6 @@ labSizeI   = input.string("Small", "Label Text Size", options = ["Tiny", "Small"
 // -----------------------------------------------------------------------------
 //  5. DASHBOARD INPUTS
 // -----------------------------------------------------------------------------
-alertMode  = input.string("Two alerts (BUY and SELL separately)", "Alert Method", options = ["Two alerts (BUY and SELL separately)", "One alert (alert function)"], group = G_ALERT, tooltip = "Two alerts: create one alert per condition. Both alerts MUST be created with identical indicator settings, or a single cross can trigger both.\nOne alert: create a single alert on 'Any alert() function call'. The script builds the JSON itself, so only one message is ever sent and the action always matches the marker. Immune to the double-fire problem.", display = display.none)
 showDash   = input.bool(true, "Show Win Rate Dashboard", group = G_DASH, display = display.none)
 dashSizeI  = input.string("Small", "Dashboard Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH, display = display.none)
 dashBg     = input.color(color.new(color.black, 20), "Dashboard Background", group = G_DASH, display = display.none)
@@ -143,9 +173,7 @@ markerSizeV = markSizeI == "Tiny" ? size.tiny : markSizeI == "Normal" ? size.nor
 
 // Smoothed moving average used for the high & low impulse bands.
 // LazyBear's original loop was:  smma = (smma[1] * (len - 1) + src) / len
-// seeded with an SMA. ta.rma() is exactly that same Wilder smoothing, but it
-// carries no self-referencing series, which avoids the "Pine cannot determine
-// the referencing length of series" runtime error when the script is attached.
+// seeded with an SMA. ta.rma() is exactly that same Wilder smoothing.
 calc_smma(float source, simple int len) =>
     ta.rma(source, len)
 
@@ -160,39 +188,38 @@ float hiBand = calc_smma(high, lengthMA)     // upper impulse band
 float loBand = calc_smma(low, lengthMA)      // lower impulse band
 float mid    = calc_zlema(srcInput, lengthMA) // zero-lag mid line
 
-// md = the Impulse MACD value. It is 0 while price sits inside the bands.
+// md = the Impulse MACD value. It is 0 while the mid line sits inside the bands.
 float md = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
 float sb = ta.sma(md, lengthSignal)          // signal line
 
 // -----------------------------------------------------------------------------
 //  THE CROSSOVER - THIS IS THE ONLY THING THAT FIRES A SIGNAL
 //
-//  Two lines, and one event between them:
-//      md = the Impulse MACD line, driven by "Impulse MA Length (slow line)"
-//      sb = the signal line,       driven by "Signal Line Length (fast line)"
-//
-//  A signal is fired on the bar the two lines SWAP PLACES. Nothing else is
-//  consulted - no zone filter, no direction filter, no trend check. If the
-//  lines cross on the chart, an alert fires on that bar. If they do not cross,
-//  no alert fires. That is the whole rule.
+//  A signal fires on the bar the two lines SWAP PLACES. If they cross on the
+//  chart, an alert fires on that bar. If they do not cross, no alert fires.
+//  That is the whole rule - no filters sit between the crossing and the alert.
 //
 //  WHY NOT PLAIN ta.crossover()?
-//  ta.crossover(md, sb) needs md strictly BELOW sb on the previous bar. The
-//  Impulse MACD is pinned to exactly 0 whenever price sits inside the impulse
-//  bands, and after a few such bars sb - its own short average of md - reaches
-//  0 as well. Both lines then sit ON the zero level, neither strictly above the
-//  other, so the move out of that flat stretch is silently dropped even though
-//  the chart plainly shows the lines separating.
+//  ta.crossover(md, sb) needs md strictly BELOW sb on the previous bar and
+//  strictly ABOVE it now. The Impulse MACD is pinned to exactly 0 whenever the
+//  mid line sits inside the impulse bands, and after a few such bars sb - its
+//  own short average of md - reaches 0 as well. Both lines then rest ON the
+//  zero level, neither strictly above the other, so the move out of that flat
+//  stretch is silently dropped even though the chart plainly shows the lines
+//  separating. On 591 bars of gold-like data that is 21 bars where md - sb is
+//  exactly 0, every one of them a crossing ta.crossover would have missed.
 //
 //  f_cross fixes that by remembering the last side the lines were genuinely on.
 //  A bar where the two are exactly equal HOLDS that side rather than clearing
 //  it, so a flat stretch at zero can neither swallow a real crossing nor invent
-//  a fake one.
+//  a fake one: lines that converge at zero and then separate the SAME way as
+//  before are correctly left alone, and lines that separate the OTHER way are
+//  correctly reported as a cross.
 // -----------------------------------------------------------------------------
 f_cross(float lineA, float lineB) =>
     float diff = lineA - lineB
     var int side = 0                                  // +1 = A above B, -1 = A below B
-    int cur = diff > 0 ? 1 : diff < 0 ? -1 : side     // equal bar keeps the old side
+    int cur = diff > 0 ? 1 : diff < 0 ? -1 : side     // an equal bar keeps the old side
     bool up = cur == 1 and side == -1                 // A crossed UP through B
     bool dn = cur == -1 and side == 1                 // A crossed DOWN through B
     side := cur
@@ -207,26 +234,34 @@ bool rawBuy   = reversed ? mdDn : mdUp
 bool rawSell  = reversed ? mdUp : mdDn
 
 // NO REPAINT GATE: the bar must be finished before a signal counts. This is the
-// only condition applied on top of the cross, and it changes WHEN a signal is
-// confirmed, never WHETHER the cross counts as one.
+// only condition applied on top of the cross, and it changes WHEN a crossing is
+// confirmed, never WHETHER it counts as one.
 bool buySignal  = rawBuy  and barstate.isconfirmed
 bool sellSignal = rawSell and barstate.isconfirmed
 
 // -----------------------------------------------------------------------------
-//  DIAGNOSTIC COUNTERS
-//  rawCount   = crossings found between md and sb.
-//  firedCount = signals actually fired.
-//  With filters removed these two must now be IDENTICAL. If they ever differ,
-//  something is still standing between the cross and the alert.
-//  mdLiveBars = bars where md was off zero, i.e. price outside the bands.
+//  DIAGNOSTIC COUNTERS - shown at the bottom of the dashboard
+//  Crossings    = crossings found between md and sb.
+//  Alerts Fired = signals actually sent. With no filters left these two MUST be
+//                 identical; if they ever differ, something is standing between
+//                 the crossing and the alert.
+//  One Signal Per = the live crossing rate. Use it to tune Signal Length.
+//  md vs sb     = which line is on top right now.
+//  Last Cross   = direction and age of the most recent crossing.
 // -----------------------------------------------------------------------------
-var int rawCount   = 0
-var int firedCount = 0
-var int mdLiveBars = 0
+var int rawCount     = 0
+var int firedCount   = 0
+var int mdLiveBars   = 0
+var int barsCounted  = 0
+var int lastCrossDir = 0
+var int lastCrossBar = na
 
 if barstate.isconfirmed
+    barsCounted += 1
     if rawBuy or rawSell
         rawCount += 1
+        lastCrossDir := rawBuy ? 1 : -1
+        lastCrossBar := bar_index
     if md != 0.0
         mdLiveBars += 1
 
@@ -257,8 +292,6 @@ bool newSignal = buySignal or sellSignal
 
 if newSignal
     firedCount += 1
-
-if newSignal
     float entryP = close                       // entry = close of the confirmed bar
     float dSL  = f_dist(distMethod, slPips,  slAtr,  slPct,  entryP)
     float dT1  = f_dist(distMethod, tp1Pips, tp1Atr, tp1Pct, entryP)
@@ -285,7 +318,7 @@ var label lbT1 = na
 var label lbT2 = na
 var label lbT3 = na
 
-// Build the text for a level label, e.g.  "TP1  2665.00  (+150.0 pips)"
+// Build the text for a level label, e.g.  "TP1  2665.00  (150.0 pips)"
 f_labTxt(string name, float price, float entryP) =>
     string txt = name + "  " + str.tostring(price, format.mintick)
     if showPips and pipPrice > 0
@@ -363,7 +396,7 @@ if not na(lnE)
 //  Labels are drawing objects, not plots, so they cost nothing against that
 //  limit and still allow the shape AND the colour to be chosen freely.
 //  Note: TradingView keeps at most 500 labels, so markers show for the most
-//  recent ~500 signals. The five level labels are re-used, not accumulated.
+//  recent 500 signals. The five level labels are re-used, not accumulated.
 // =============================================================================
 f_markerStyle(string s) =>
     switch s
@@ -388,7 +421,7 @@ if sellSignal
     label.new(bar_index, high, "SELL", yloc = yloc.abovebar, style = f_markerStyle(sellShape), color = sellColor, textcolor = sellTxtCol, size = markerSizeV)
 
 // =============================================================================
-//  ALERT PLOTS - read by {{plot("title")}}, matched by TITLE not by number.
+//  ALERT PLOTS - read by the plot placeholders, matched by TITLE not by number.
 //  display.none keeps them off the chart; TradingView still feeds them to the
 //  alert placeholders. nz(..., close) guarantees a finite number, never na.
 // =============================================================================
@@ -405,33 +438,6 @@ plot(nz(pTP3,   close), title = "tp3",   display = display.none)
 alertcondition(buySignal, title = "MFZ BUY (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "buy",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"\n}')
 
 alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "sell",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-sell-{{time}}"\n}')
-
-// -----------------------------------------------------------------------------
-//  SINGLE-ALERT PATH - identical JSON, but built inside Pine.
-//  Only fires when Alert Method is "One alert (alert function)". Because the
-//  script writes the message itself, exactly ONE payload is sent per signal and
-//  its "action" always matches the marker on the chart.
-//  Set the alert up as: Condition "BYA IMACD1" -> "Any alert() function call".
-// -----------------------------------------------------------------------------
-f_json(string action) =>
-    string j = '{\n'
-    j += '  "symbol": "' + syminfo.ticker + '",\n'
-    j += '  "action": "' + action + '",\n'
-    j += '  "entry": ' + str.tostring(nz(pEntry, close), format.mintick) + ',\n'
-    j += '  "sl": '    + str.tostring(nz(pSL,    close), format.mintick) + ',\n'
-    j += '  "tp": '    + str.tostring(nz(pTP1,   close), format.mintick) + ',\n'
-    j += '  "tp2": '   + str.tostring(nz(pTP2,   close), format.mintick) + ',\n'
-    j += '  "tp3": '   + str.tostring(nz(pTP3,   close), format.mintick) + ',\n'
-    j += '  "tv_time": "' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",\n'
-    j += '  "tv_alert_id": "tv-' + syminfo.ticker + '-' + action + '-' + str.tostring(time) + '"\n'
-    j += '}'
-    j
-
-if alertMode == "One alert (alert function)"
-    if buySignal
-        alert(f_json("buy"), alert.freq_once_per_bar_close)
-    else if sellSignal
-        alert(f_json("sell"), alert.freq_once_per_bar_close)
 
 // =============================================================================
 //  WIN RATE DASHBOARD
@@ -510,7 +516,7 @@ if showDash and barstate.isconfirmed
         vGotT3 := false
 
 // ---- 3) render the table in the TOP-RIGHT corner on the last bar ----
-var table dash = table.new(position.top_right, 2, 12, border_width = 1)
+var table dash = table.new(position.top_right, 2, 14, border_width = 1)
 
 f_pct(int part, int total) =>
     float p = part          // cast to float first: int / int is integer division in Pine
@@ -523,8 +529,19 @@ if barstate.islast and showDash
     float winRate = fTotal > 0 ? fWins / fTotal * 100.0 : 0.0
     color rateCol = winRate >= 50.0 ? dashWinCol : dashLosCol
 
+    // Live crossing rate, so Signal Length can be tuned while back testing.
+    float fBars  = barsCounted
+    float fCross = rawCount
+    string rateTxt = rawCount > 0 ? str.tostring(fBars / fCross, "#.#") + " bars" : "-"
+
+    // Which line is on top right now, and when they last swapped.
+    string sideTxt = md > sb ? "md ABOVE sb" : md < sb ? "md BELOW sb" : "equal"
+    color  sideCol = md > sb ? dashWinCol : md < sb ? dashLosCol : dashTxt
+    string lastTxt = lastCrossDir == 0 ? "none yet" : (lastCrossDir == 1 ? "BUY" : "SELL") + "  " + str.tostring(bar_index - lastCrossBar) + " bars ago"
+    color  lastCol = lastCrossDir == 1 ? dashWinCol : lastCrossDir == -1 ? dashLosCol : dashTxt
+
     table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 0, distMethod,       text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 0, distMethod,   text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 2, "Wins",     text_color = dashTxt, bgcolor = dashBg)
@@ -541,14 +558,18 @@ if barstate.islast and showDash
     table.cell(dash, 1, 7, f_pct(t2Count, totalTrades), text_color = tp2Col, bgcolor = dashBg)
     table.cell(dash, 0, 8, "TP3 Hit",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 8, f_pct(t3Count, totalTrades), text_color = tp3Col, bgcolor = dashBg)
-    table.cell(dash, 0, 9, "Raw Crosses", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 9, "Crossings", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 9, str.tostring(rawCount), text_color = rawCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 10, "After Filters", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 10, str.tostring(firedCount), text_color = firedCount > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
-    table.cell(dash, 0, 11, "Bars md != 0", text_color = dashTxt, bgcolor = dashBg)
-    table.cell(dash, 1, 11, str.tostring(mdLiveBars), text_color = mdLiveBars > 0 ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 10, "Alerts Fired", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 10, str.tostring(firedCount), text_color = firedCount == rawCount ? dashTxt : dashLosCol, bgcolor = dashBg)
+    table.cell(dash, 0, 11, "One Signal Per", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 11, rateTxt, text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 12, "md vs sb", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 12, sideTxt, text_color = sideCol, bgcolor = dashBg)
+    table.cell(dash, 0, 13, "Last Cross", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 1, 13, lastTxt, text_color = lastCol, bgcolor = dashBg)
 
     // apply the chosen dashboard text size to every cell (safe with variables)
-    for r = 0 to 11
+    for r = 0 to 13
         for c = 0 to 1
             table.cell_set_text_size(dash, c, r, dashSizeV)

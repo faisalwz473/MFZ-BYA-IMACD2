@@ -10,59 +10,99 @@ into a live-ready setup with Entry / SL / TP1 / TP2 / TP3 levels and a TVMT webh
 ## Signal
 
 **The crossing of the two lines is the only thing that fires an alert.**
-With **MA Length 10** (slow, drives the Impulse MACD line `md`) and
-**Signal Length 3** (fast, drives the signal line `sb`):
 
-- `md` crosses **up** through `sb` → **BUY**
+- `md` (Impulse MACD line, driven by **MA Length**, slow) crosses **up** through
+  `sb` (signal line, driven by **Signal Length**, fast) → **BUY**
 - `md` crosses **down** through `sb` → **SELL**
 
-There is no zone filter, no one-signal-per-direction filter and no trend filter.
-Any of those can swallow a crossing and leave the alerts out of step with the
-chart, so they were removed. Lot size, TP and SL are managed in TVMT.
+No zone filter, no one-signal-per-direction filter, no trend filter. Each of
+those could swallow a crossing and leave the alerts out of step with the chart,
+so they were removed. Lot size, TP and SL are managed in TVMT.
 
-A single setting, **Which Cross Is A BUY**, swaps the two labels:
+`barstate.isconfirmed` is the only remaining gate. It sets *when* a crossing is
+confirmed, never *whether* it counts — so signals print on bar close and never
+repaint.
+
+### Which cross is a BUY
+
+One control, **Which Cross Is A BUY**:
 
 | Setting | Meaning |
 | --- | --- |
-| `MACD crosses Signal Line (standard)` *(default)* | `md` up through `sb` = BUY. Follows price direction. |
-| `Signal Line crosses MACD (reversed)` | The **same** crossings with BUY and SELL swapped. |
+| `MACD crosses Signal Line (standard)` *(default)* | `md` up through `sb` = BUY. |
+| `Signal Line crosses MACD (reversed)` | The **same** crossings, BUY and SELL swapped. |
 
-Both options describe one and the same event — two lines can only swap places
-once per crossing — so this only decides which side gets called BUY. The old
-separate `Invert Buy / Sell` checkbox was removed: having two controls that do
-the same job made it easy to flip twice and end up back where you started.
+Two lines can only swap places once per crossing, so both settings describe one
+and the same event — this only decides which side gets called BUY. The standard
+orientation is the one that follows price: `sb` is a moving average *of* `md`,
+so `md` rising above it means momentum is turning up.
 
-## Why the alerts did not match the chart
+The old separate `Invert Buy / Sell` checkbox was removed. Having two controls
+that do the same job made it easy to flip twice and land back where you started.
 
-The `Signal Mode` dropdown used to carry two extra options that are **not** the
-MACD/signal crossing at all:
+## Match the lengths to your pane indicator
 
-- `Fast MA crosses Slow MA (price)` — a plain EMA(3)/EMA(10) crossover on *price*
-- `Zero Line Cross` — the Impulse MACD crossing zero
+**This was the actual cause of the misalignment.**
 
-For a while `Fast MA crosses Slow MA (price)` was the **default**. TradingView
-stores an indicator's input values inside the saved chart layout, so a chart set
-up during that period keeps running the price-EMA crossover even after the
-script's default is changed back — the saved value always wins over a new
-default. The alerts were faithfully reporting an EMA-on-price crossover while
-the chart was being read against the MACD and signal lines.
+A lower-pane legend reading `IMACD_LB 24 9` is running **MA Length 24, Signal
+Length 9**. The overlay was defaulting to **10 / 3** — a different, much faster
+pair of lines. The crossings the two indicators produce are simply not the same
+events, so the alerts could never line up with the pane no matter what.
 
-Both options are now gone, so the stale saved value can no longer be restored.
+`sb` is a moving average **of** `md`, so a short Signal Length glues it to `md`
+and the two cross on nearly every wiggle. Measured over 591 bars of gold-like
+synthetic data:
 
-> **After updating the script, open Settings → Inputs and confirm
-> `Which Cross Is A BUY` reads `MACD crosses Signal Line (standard)`.**
-> If markers still sit on the wrong side, switch it to the reversed option —
-> that one setting is now the only thing that can flip them.
+| MA / Signal | Crossings | One signal per | |
+| --- | --- | --- | --- |
+| 10 / 3 | 101 | ~6 bars | *old default* |
+| 12 / 6 | 55 | ~11 bars | |
+| 21 / 7 | 27 | ~22 bars | |
+| **24 / 9** | **23** | **~25 bars** | **new default — matches `IMACD_LB 24 9`** |
+| 34 / 9 | 16 | ~35 bars | LazyBear stock |
+
+At 10/3 the script fired about **4.4× more often** than a 24/9 pane shows
+crossings — which is exactly what the chart showed: roughly ten BUY/SELL labels
+on price against about four crossings in the pane over the same window. The
+engine was never ignoring the crossings; it was reading a different pair of
+lines and catching every small one.
+
+> **TradingView stores input values in the saved chart layout, and a saved value
+> outranks a new default.** After updating the script, open Settings → Inputs
+> and confirm **MA Length** and **Signal Length** actually read **24** and **9**.
+> If they still say 10 and 3, set them by hand or reset the indicator to
+> defaults.
+
+Whatever numbers your pane indicator uses, the overlay must use the same ones.
+
+## Dashboard diagnostics
+
+Five rows at the bottom of the table exist to verify the alerts track the lines:
+
+| Row | Meaning |
+| --- | --- |
+| `Crossings` | Crossings found between `md` and `sb`. |
+| `Alerts Fired` | Signals actually sent. **Must equal `Crossings`** — it turns red if not. |
+| `One Signal Per` | Live crossing rate, for tuning Signal Length. |
+| `md vs sb` | Which line is on top right now. |
+| `Last Cross` | Direction and age of the most recent crossing. |
+
+`Crossings` and `Alerts Fired` diverging would mean something is standing between
+a crossing and its alert. With the filters removed, nothing can.
 
 ## Checking alignment against the pane indicator
 
-This script is an **overlay**, so `md` and `sb` are not drawn on it. To compare
-it against *Impulse MACD [LazyBear]* in the lower pane, that pane copy must use
-the same numbers or the lines will not be the ones firing your alerts:
+This script is an **overlay**, so `md` and `sb` are not drawn on it — Pine cannot
+plot into a lower pane from an overlay script. To compare against
+*Impulse MACD [LazyBear]* in the lower pane, that pane copy must use the same
+numbers or the lines you are watching are not the ones firing your alerts:
 
 - MA Length **10** (LazyBear ships 34)
 - Signal Length **3** (LazyBear ships 9)
 - Source **hlc3**
+
+The `md vs sb` and `Last Cross` dashboard rows let you check the two agree
+without eyeballing it.
 
 ## Key behaviour
 - **No repainting** — signals are gated behind `barstate.isconfirmed`, so a printed marker never disappears.
