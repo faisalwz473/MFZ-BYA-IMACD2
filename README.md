@@ -168,29 +168,48 @@ without eyeballing it.
 - Every input uses `display = display.none`, so the chart status line shows only the indicator name.
 
 ## Alert setup (TVMT webhook)
+
 1. Right-click the chart → **Add alert**
-2. Condition: **MFZ BYA IMACD2** → pick **MFZ BUY (TVMT)** or **MFZ SELL (TVMT)**
+2. Condition: **BYA IMACD2** → pick **MFZ BUY (TVMT)** or **MFZ SELL (TVMT)**
 3. Trigger: **Once Per Bar Close**
 4. Leave the pre-filled JSON message exactly as it is — do not add any text
-5. Notifications tab → **Webhook URL** → paste your TVMT bridge URL
+5. Notifications tab → tick **Webhook URL** → enter your TVMT bridge URL
 
-Alert payload (values arrive as raw numbers via `{{plot("title")}}`):
+Create **both** alerts — BUY and SELL are separate conditions.
+
+### Signal-only payload
+
+**TVMT owns entry price, TP, SL and lot size.** The alert therefore carries only
+*what* happened and *when*:
 
 ```json
 {
   "symbol": "{{ticker}}",
   "action": "buy",
-  "entry": {{plot("entry")}},
-  "sl": {{plot("sl")}},
-  "tp": {{plot("tp")}},
-  "tp2": {{plot("tp2")}},
-  "tp3": {{plot("tp3")}},
   "tv_time": "{{timenow}}",
   "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"
 }
 ```
 
-`"tp"` carries TP1. Levels are matched by plot **title**, not by number, so plot order can never break the webhook.
+No `entry`, `sl`, `tp`, `tp2` or `tp3`. Sending levels the bridge is going to
+overrule is at best noise, and at worst a payload it rejects. This matches the
+field order of the known-working MSB alerts (`symbol`, `action`, `tv_time`).
+
+The five hidden `entry`/`sl`/`tp` plots that fed `{{plot("...")}}` placeholders
+were removed along with those fields — nothing reads them any more.
+
+> **The chart levels are now indicative only.** The script still draws Entry /
+> SL / TP1–3 and the dashboard still scores them, because they are useful for
+> reading and tuning the signal. But TVMT sets the levels that actually get
+> traded, so **the dashboard win rate measures a hypothetical 1:1 exit plan, not
+> your live results.** Judge the signal by it; do not judge your account by it.
+
+### If TVMT rejects the payload
+
+Open a working MSB alert, copy its full Message body, and compare. If TVMT needs
+a field this payload lacks (a licence id, a risk value, a symbol suffix), the
+two `alertcondition` message strings near the bottom of the script are the only
+place to change.
 
 ## Why the markers are labels, not plotshapes
 TradingView allows a maximum of **64 plot outputs per script**, and a `plotshape()` with a

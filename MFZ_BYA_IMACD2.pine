@@ -17,7 +17,14 @@
 //  Nothing else is consulted. There is no zone filter, no one-signal-per-
 //  direction filter and no trend filter - each of those could swallow a
 //  crossing and leave the alerts out of step with the chart, so they were
-//  removed. Lot size, TP and SL are managed in TVMT.
+//  removed.
+//
+//  TVMT OWNS ENTRY, TP, SL AND LOT SIZE. The alert payload carries only the
+//  symbol, the direction, the time and a unique id - no price levels at all.
+//  The chart still draws Entry / SL / TP1-3 and the dashboard still scores
+//  them, but those are INDICATIVE ONLY: they help you read and tune the signal,
+//  they are not what gets traded. Read the dashboard win rate as a property of
+//  the SIGNAL under a hypothetical 1:1 exit plan, never as your live results.
 //
 //  "Which Cross Is A BUY" is the single control that swaps the two labels.
 //  Two lines can only swap places once per crossing, so both settings describe
@@ -96,7 +103,7 @@
 //   Right-click chart -> Add alert -> Condition: "BYA IMACD2"
 //   -> choose "MFZ BUY (TVMT)" or "MFZ SELL (TVMT)"
 //   -> Trigger: "Once Per Bar Close"
-//   -> The Message box is pre-filled with the JSON. Do not edit it.
+//   -> The Message box is pre-filled with the signal-only JSON. Do not edit it.
 //   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
 // =============================================================================
 
@@ -455,23 +462,27 @@ if sellSignal
     label.new(bar_index, high, "SELL", yloc = yloc.abovebar, style = f_markerStyle(sellShape), color = sellColor, textcolor = sellTxtCol, size = markerSizeV)
 
 // =============================================================================
-//  ALERT PLOTS - read by the plot placeholders, matched by TITLE not by number.
-//  display.none keeps them off the chart; TradingView still feeds them to the
-//  alert placeholders. nz(..., close) guarantees a finite number, never na.
-// =============================================================================
-plot(nz(pEntry, close), title = "entry", display = display.none)
-plot(nz(pSL,    close), title = "sl",    display = display.none)
-plot(nz(pTP1,   close), title = "tp",    display = display.none)   // "tp" carries TP1
-plot(nz(pTP2,   close), title = "tp2",   display = display.none)
-plot(nz(pTP3,   close), title = "tp3",   display = display.none)
-
-// =============================================================================
 //  TVMT WEBHOOK ALERTS - exact JSON, nothing else in the message box.
 //  Set the alert trigger to "Once Per Bar Close".
+//
+//  SIGNAL-ONLY PAYLOAD. TVMT owns entry price, TP and SL, so the alert carries
+//  only WHAT happened and WHEN: the symbol, the direction, the time and a
+//  unique id. It deliberately sends no entry / sl / tp / tp2 / tp3 fields -
+//  sending levels the bridge is going to overrule is at best noise and at worst
+//  a payload it rejects. This matches the field order of the working MSB alerts
+//  (symbol, action, tv_time).
+//
+//  The five hidden "entry"/"sl"/"tp" plots that used to feed {{plot("...")}}
+//  placeholders were removed with those fields. Nothing reads them any more.
+//
+//  The chart still DRAWS Entry / SL / TP1-3 and the dashboard still scores
+//  them, because they are useful for reading and tuning the signal. They are
+//  now INDICATIVE ONLY - TVMT sets the levels that actually get traded, so the
+//  dashboard win rate measures a hypothetical exit plan, not your live results.
 // =============================================================================
-alertcondition(buySignal, title = "MFZ BUY (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "buy",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"\n}')
+alertcondition(buySignal, title = "MFZ BUY (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "buy",\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-buy-{{time}}"\n}')
 
-alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "sell",\n  "entry": {{plot("entry")}},\n  "sl": {{plot("sl")}},\n  "tp": {{plot("tp")}},\n  "tp2": {{plot("tp2")}},\n  "tp3": {{plot("tp3")}},\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-sell-{{time}}"\n}')
+alertcondition(sellSignal, title = "MFZ SELL (TVMT)", message = '{\n  "symbol": "{{ticker}}",\n  "action": "sell",\n  "tv_time": "{{timenow}}",\n  "tv_alert_id": "tv-{{ticker}}-sell-{{time}}"\n}')
 
 // =============================================================================
 //  WIN RATE DASHBOARD
