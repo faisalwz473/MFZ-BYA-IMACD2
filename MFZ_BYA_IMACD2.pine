@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-//  BYA IMACD1
+//  BYA IMACD2
 // -----------------------------------------------------------------------------
 //  Signal engine adapted from "Impulse MACD [LazyBear]" (open source, credit to
 //  LazyBear). The original was a lower-pane study; this version is an OVERLAY
@@ -93,14 +93,14 @@
 //  that can and does disagree with the crossing.
 //
 //  ALERT SETUP (do this once in TradingView)
-//   Right-click chart -> Add alert -> Condition: "BYA IMACD1"
+//   Right-click chart -> Add alert -> Condition: "BYA IMACD2"
 //   -> choose "MFZ BUY (TVMT)" or "MFZ SELL (TVMT)"
 //   -> Trigger: "Once Per Bar Close"
 //   -> The Message box is pre-filled with the JSON. Do not edit it.
 //   -> Notifications tab -> Webhook URL -> paste your TVMT bridge URL.
 // =============================================================================
 
-indicator(title = "BYA IMACD1", shorttitle = "BYA IMACD1", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
+indicator(title = "BYA IMACD2", shorttitle = "BYA IMACD2", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
 
 // =============================================================================
 //  INPUT GROUPS
@@ -574,7 +574,7 @@ if barstate.islast and showDash
     string lastTxt = lastCrossDir == 0 ? "none yet" : (lastCrossDir == 1 ? "BUY" : "SELL") + "  " + str.tostring(bar_index - lastCrossBar) + " bars ago"
     color  lastCol = lastCrossDir == 1 ? dashWinCol : lastCrossDir == -1 ? dashLosCol : dashTxt
 
-    table.cell(dash, 0, 0, "BYA IMACD1", text_color = dashTxt, bgcolor = dashBg)
+    table.cell(dash, 0, 0, "BYA IMACD2", text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 0, distMethod,   text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 0, 1, "Signals",  text_color = dashTxt, bgcolor = dashBg)
     table.cell(dash, 1, 1, str.tostring(totalTrades), text_color = dashTxt, bgcolor = dashBg)
