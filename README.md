@@ -177,6 +177,37 @@ without eyeballing it.
 
 Create **both** alerts — BUY and SELL are separate conditions.
 
+### If the Webhook URL field refuses your paste
+
+A known TradingView quirk, confirmed by TVMT support: a long-running browser
+session stops accepting input in the Webhook URL field. The field looks normal,
+the checkbox is ticked, but nothing lands and Create reports
+*"A Webhook URL is required."*
+
+**Log out of TradingView and log back in.** A page refresh is not enough.
+
+Ruled out along the way, so don't waste time on them: it is not the plan (the
+field validates rather than being greyed out), not the checkbox, not the alert
+count, and nothing to do with this indicator. Two useful checks while
+diagnosing — type `https://example.com/test` by hand to prove the field accepts
+input at all, and remember that example.com answers POST with **405 Method Not
+Allowed**, so that placeholder will always show a delivery failure in the log.
+
+### Verify the direction before trading
+
+Each `alertcondition` hardcodes its own direction, so the alert list preview is
+proof of which condition you picked:
+
+```
+BYA IMACD2 5m BUY    { "symbol": "{{ticker}}", "action": "buy",  "tv_time": ...
+BYA IMACD2 5m SELL   { "symbol": "{{ticker}}", "action": "sell", "tv_time": ...
+```
+
+If the SELL row reads `"action": "buy"`, the wrong condition was selected in the
+second dropdown — delete the alert and recreate it. An `"entry":` field in either
+row means the alert was created against an older version of the script and is
+stale.
+
 ### Signal-only payload
 
 **TVMT owns entry price, TP, SL and lot size.** The alert therefore carries only
