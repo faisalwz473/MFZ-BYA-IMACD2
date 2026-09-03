@@ -8,14 +8,19 @@
 //  alert for the TVMT webhook bridge.
 //
 //  HOW IT WORKS (beginner summary)
-//   1. The fast signal line (sb, length 3) crossing the slower Impulse MACD
-//      line (md, length 10) is the entry trigger:
-//         sb crosses UP through md   -> BUY
-//         sb crosses DOWN through md -> SELL
-//      Two alternative modes (MACD crosses Signal, Zero Line Cross) are kept
-//      as options in Settings.
+//   1. THE CROSSING OF THE TWO LINES IS THE ONLY TRIGGER. Nothing else can
+//      fire a signal:
+//         md (Impulse MACD line, "MA Length", slow) crosses UP   through
+//         sb (signal line, "Signal Length", fast)               -> BUY
+//         md crosses DOWN through sb                            -> SELL
+//      The "Which Cross Is A BUY" setting swaps those two labels if your chart
+//      reads the other way round. There is no zone filter, no one-per-direction
+//      filter and no trend filter - they were removed, because any of them can
+//      swallow a cross and leave the alerts out of step with the chart.
+//      Lot size, TP and SL are managed in TVMT.
 //   2. A signal is only accepted when the bar has CLOSED (barstate.isconfirmed),
-//      so a printed arrow can never disappear again -> no repainting.
+//      so a printed arrow can never disappear again -> no repainting. This
+//      affects WHEN a cross is confirmed, never WHETHER it counts.
 //   3. On that closed bar we capture Entry / SL / TP1 / TP2 / TP3 prices,
 //      draw them, and feed them to five hidden plots that the alert reads.
 //   4. The alert message is pure JSON built from {{plot("title")}} placeholders,
@@ -53,13 +58,7 @@ G_ALERT = "6 - Alerts"
 lengthMA     = input.int(10, "Impulse MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Drives the Impulse MACD line (md). Default = 10. LazyBear original used 34.", display = display.none)
 lengthSignal = input.int(3, "Signal Line Length (fast line)", minval = 1, group = G_SIG, tooltip = "Drives the signal line (sb). Default = 3. LazyBear original used 9.", display = display.none)
 srcInput     = input.source(hlc3, "Price Source", group = G_SIG, display = display.none)
-signalMode   = input.string("MACD crosses Signal Line", "Signal Mode", options = ["MACD crosses Signal Line", "Signal Line crosses MACD", "Fast MA crosses Slow MA (price)", "Zero Line Cross"], group = G_SIG, tooltip = "MACD crosses Signal Line (default): the Impulse MACD crossing UP through its signal line = BUY. This matches price direction.\nSignal Line crosses MACD: the reverse orientation, reads backwards against price.\nFast MA crosses Slow MA (price): EMA(3) over EMA(10) on price = BUY.\nZero Line Cross: the Impulse MACD turning positive = BUY.", display = display.none)
-invertSig    = input.bool(false, "Invert Buy / Sell", group = G_SIG, tooltip = "Emergency flip. If every marker is on the wrong side, tick this and BUY becomes SELL and SELL becomes BUY, in whichever mode you are using.", display = display.none)
-showMAs      = input.bool(false, "Show The Two MAs On Chart", group = G_SIG, tooltip = "Only draws in Fast MA / Slow MA mode, so you can see the crossover on price.", display = display.none)
-fastMACol    = input.color(color.aqua, "Fast MA Colour", group = G_SIG, display = display.none)
-slowMACol    = input.color(color.orange, "Slow MA Colour", group = G_SIG, display = display.none)
-useZone      = input.bool(false, "Require Impulse Zone Confirmation", group = G_SIG, tooltip = "Buy only while price is above the mid band, Sell only while below it. Filters out weak crosses.", display = display.none)
-flipOnly     = input.bool(false, "One Signal Per Direction (wait for opposite)", group = G_SIG, tooltip = "Blocks a second Buy before a Sell appears. Keeps one live setup at a time.", display = display.none)
+signalMode   = input.string("MACD crosses Signal Line (standard)", "Which Cross Is A BUY", options = ["MACD crosses Signal Line (standard)", "Signal Line crosses MACD (reversed)"], group = G_SIG, tooltip = "There is only ONE crossing event between the two lines. This setting just decides which side of it is called BUY.\n\nMACD crosses Signal Line (standard): the Impulse MACD line (md) crossing UP through the signal line (sb) = BUY. This is the normal reading and follows price direction.\n\nSignal Line crosses MACD (reversed): the exact same crossings with BUY and SELL swapped. Use this only if every marker on your chart sits on the wrong side.", display = display.none)
 
 // -----------------------------------------------------------------------------
 //  2. DISTANCE METHOD INPUTS  (Pip / ATR / Percentage - trader picks one)
@@ -166,83 +165,60 @@ float md = mid > hiBand ? mid - hiBand : mid < loBand ? mid - loBand : 0.0
 float sb = ta.sma(md, lengthSignal)          // signal line
 
 // -----------------------------------------------------------------------------
-//  RAW SIGNALS - one pair per mode, the dropdown picks which pair is used
+//  THE CROSSOVER - THIS IS THE ONLY THING THAT FIRES A SIGNAL
 //
-//  WHY NOT ta.crossover()?  ta.crossover(a, b) needs a to be strictly BELOW b
-//  on the previous bar and strictly ABOVE it now. When the Impulse MACD sits at
-//  exactly 0 (price inside the bands), md is 0 and sb - its own average - is 0
-//  too. The two lines sit ON TOP of each other at the zero level, which LOOKS
-//  like a crossing on the chart but registers as no cross at all, because
-//  neither is ever strictly above the other. That is why signals only appeared
-//  at the moments the lines happened to separate.
+//  Two lines, and one event between them:
+//      md = the Impulse MACD line, driven by "Impulse MA Length (slow line)"
+//      sb = the signal line,       driven by "Signal Line Length (fast line)"
 //
-//  f_signFlip fixes that. It watches the SIGN of (line1 - line2) and fires the
-//  moment that sign flips, ignoring any flat stretch at zero in between. So a
-//  cross is detected whenever the lines genuinely swap places, whether they
-//  crossed cleanly or sat together at zero first.
+//  A signal is fired on the bar the two lines SWAP PLACES. Nothing else is
+//  consulted - no zone filter, no direction filter, no trend check. If the
+//  lines cross on the chart, an alert fires on that bar. If they do not cross,
+//  no alert fires. That is the whole rule.
+//
+//  WHY NOT PLAIN ta.crossover()?
+//  ta.crossover(md, sb) needs md strictly BELOW sb on the previous bar. The
+//  Impulse MACD is pinned to exactly 0 whenever price sits inside the impulse
+//  bands, and after a few such bars sb - its own short average of md - reaches
+//  0 as well. Both lines then sit ON the zero level, neither strictly above the
+//  other, so the move out of that flat stretch is silently dropped even though
+//  the chart plainly shows the lines separating.
+//
+//  f_cross fixes that by remembering the last side the lines were genuinely on.
+//  A bar where the two are exactly equal HOLDS that side rather than clearing
+//  it, so a flat stretch at zero can neither swallow a real crossing nor invent
+//  a fake one.
 // -----------------------------------------------------------------------------
-f_signFlip(float d, bool confirmed) =>
-    int cur = d > 0 ? 1 : d < 0 ? -1 : 0
-    var int last = 0
-    bool up = false
-    bool dn = false
-    if confirmed and cur != 0
-        if last != 0 and cur != last
-            up := cur == 1
-            dn := cur == -1
-        last := cur
+f_cross(float lineA, float lineB) =>
+    float diff = lineA - lineB
+    var int side = 0                                  // +1 = A above B, -1 = A below B
+    int cur = diff > 0 ? 1 : diff < 0 ? -1 : side     // equal bar keeps the old side
+    bool up = cur == 1 and side == -1                 // A crossed UP through B
+    bool dn = cur == -1 and side == 1                 // A crossed DOWN through B
+    side := cur
     [up, dn]
 
-// PRICE MA MODE: fast EMA above slow EMA = BUY.
-float fastMA = ta.ema(srcInput, lengthSignal)
-float slowMA = ta.ema(srcInput, lengthMA)
-[maUp, maDn] = f_signFlip(fastMA - slowMA, barstate.isconfirmed)
+// The one and only cross: md against sb.
+[mdUp, mdDn] = f_cross(md, sb)
 
-// IMPULSE MODE (default): signal line crossing ABOVE the Impulse MACD = BUY.
-[sigUp, sigDn] = f_signFlip(sb - md, barstate.isconfirmed)
+// The dropdown only chooses which side of that same cross is labelled BUY.
+bool reversed = signalMode == "Signal Line crosses MACD (reversed)"
+bool rawBuy   = reversed ? mdDn : mdUp
+bool rawSell  = reversed ? mdUp : mdDn
 
-// REVERSED ORIENTATION: Impulse MACD crossing ABOVE its signal line = BUY.
-[macdUp, macdDn] = f_signFlip(md - sb, barstate.isconfirmed)
-
-// ZERO LINE: Impulse MACD turning positive = BUY.
-[zeroUp, zeroDn] = f_signFlip(md, barstate.isconfirmed)
-
-bool modeUp = signalMode == "Zero Line Cross" ? zeroUp : signalMode == "MACD crosses Signal Line" ? macdUp : signalMode == "Fast MA crosses Slow MA (price)" ? maUp : sigUp
-bool modeDn = signalMode == "Zero Line Cross" ? zeroDn : signalMode == "MACD crosses Signal Line" ? macdDn : signalMode == "Fast MA crosses Slow MA (price)" ? maDn : sigDn
-
-// Master invert. Swaps the two sides in whichever mode is selected.
-bool rawBuy  = invertSig ? modeDn : modeUp
-bool rawSell = invertSig ? modeUp : modeDn
-
-// Optional MA plots. display.pane draws them on the chart but keeps their
-// values OUT of the status line, so the legend stays clean.
-bool maModeOn = signalMode == "Fast MA crosses Slow MA (price)" and showMAs
-plot(maModeOn ? fastMA : na, title = "Fast MA", color = fastMACol, linewidth = 1, display = display.pane)
-plot(maModeOn ? slowMA : na, title = "Slow MA", color = slowMACol, linewidth = 1, display = display.pane)
-
-// Optional zone filter: only trade in the direction of the impulse band.
-bool zoneBuyOk  = not useZone or srcInput > mid
-bool zoneSellOk = not useZone or srcInput < mid
-
-// NO REPAINT GATE: the bar must be finished before a signal counts.
-bool buyRaw  = rawBuy  and zoneBuyOk  and barstate.isconfirmed
-bool sellRaw = rawSell and zoneSellOk and barstate.isconfirmed
-
-// Optional "one signal per direction" filter (wait for the opposite side).
-var int lastDir = 0
-bool buySignal  = buyRaw  and (not flipOnly or lastDir != 1)
-bool sellSignal = sellRaw and not buyRaw and (not flipOnly or lastDir != -1)   // never both on one bar
-if buySignal
-    lastDir := 1
-else if sellSignal
-    lastDir := -1
+// NO REPAINT GATE: the bar must be finished before a signal counts. This is the
+// only condition applied on top of the cross, and it changes WHEN a signal is
+// confirmed, never WHETHER the cross counts as one.
+bool buySignal  = rawBuy  and barstate.isconfirmed
+bool sellSignal = rawSell and barstate.isconfirmed
 
 // -----------------------------------------------------------------------------
 //  DIAGNOSTIC COUNTERS
-//  rawCount   = crosses the signal engine found, BEFORE any filter.
-//  firedCount = signals that survived the zone filter and the flip filter.
-//  If rawCount is 0 the cross itself never happens (md is flat). If rawCount is
-//  high but firedCount is 0, a filter is eating every signal.
+//  rawCount   = crossings found between md and sb.
+//  firedCount = signals actually fired.
+//  With filters removed these two must now be IDENTICAL. If they ever differ,
+//  something is still standing between the cross and the alert.
+//  mdLiveBars = bars where md was off zero, i.e. price outside the bands.
 // -----------------------------------------------------------------------------
 var int rawCount   = 0
 var int firedCount = 0

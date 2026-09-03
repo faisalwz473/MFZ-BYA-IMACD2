@@ -8,14 +8,61 @@ into a live-ready setup with Entry / SL / TP1 / TP2 / TP3 levels and a TVMT webh
 - `MFZ_BYA_IMACD2.pine` — the complete indicator, ready to paste into the TradingView Pine Editor.
 
 ## Signal
-Default **Signal Mode = "Signal Line crosses MACD"** with **Signal Length 3** and **MA Length 10**:
 
-- signal line (3) crosses **up** through the Impulse MACD line (10) → **BUY**
-- signal line (3) crosses **down** through the Impulse MACD line (10) → **SELL**
+**The crossing of the two lines is the only thing that fires an alert.**
+With **MA Length 10** (slow, drives the Impulse MACD line `md`) and
+**Signal Length 3** (fast, drives the signal line `sb`):
 
-Three other modes are selectable in Settings:
-`Fast MA crosses Slow MA (price)` (plain EMA 3 over EMA 10 on price),
-`MACD crosses Signal Line` (the original orientation), and `Zero Line Cross`.
+- `md` crosses **up** through `sb` → **BUY**
+- `md` crosses **down** through `sb` → **SELL**
+
+There is no zone filter, no one-signal-per-direction filter and no trend filter.
+Any of those can swallow a crossing and leave the alerts out of step with the
+chart, so they were removed. Lot size, TP and SL are managed in TVMT.
+
+A single setting, **Which Cross Is A BUY**, swaps the two labels:
+
+| Setting | Meaning |
+| --- | --- |
+| `MACD crosses Signal Line (standard)` *(default)* | `md` up through `sb` = BUY. Follows price direction. |
+| `Signal Line crosses MACD (reversed)` | The **same** crossings with BUY and SELL swapped. |
+
+Both options describe one and the same event — two lines can only swap places
+once per crossing — so this only decides which side gets called BUY. The old
+separate `Invert Buy / Sell` checkbox was removed: having two controls that do
+the same job made it easy to flip twice and end up back where you started.
+
+## Why the alerts did not match the chart
+
+The `Signal Mode` dropdown used to carry two extra options that are **not** the
+MACD/signal crossing at all:
+
+- `Fast MA crosses Slow MA (price)` — a plain EMA(3)/EMA(10) crossover on *price*
+- `Zero Line Cross` — the Impulse MACD crossing zero
+
+For a while `Fast MA crosses Slow MA (price)` was the **default**. TradingView
+stores an indicator's input values inside the saved chart layout, so a chart set
+up during that period keeps running the price-EMA crossover even after the
+script's default is changed back — the saved value always wins over a new
+default. The alerts were faithfully reporting an EMA-on-price crossover while
+the chart was being read against the MACD and signal lines.
+
+Both options are now gone, so the stale saved value can no longer be restored.
+
+> **After updating the script, open Settings → Inputs and confirm
+> `Which Cross Is A BUY` reads `MACD crosses Signal Line (standard)`.**
+> If markers still sit on the wrong side, switch it to the reversed option —
+> that one setting is now the only thing that can flip them.
+
+## Checking alignment against the pane indicator
+
+This script is an **overlay**, so `md` and `sb` are not drawn on it. To compare
+it against *Impulse MACD [LazyBear]* in the lower pane, that pane copy must use
+the same numbers or the lines will not be the ones firing your alerts:
+
+- MA Length **10** (LazyBear ships 34)
+- Signal Length **3** (LazyBear ships 9)
+- Source **hlc3**
 
 ## Key behaviour
 - **No repainting** — signals are gated behind `barstate.isconfirmed`, so a printed marker never disappears.
