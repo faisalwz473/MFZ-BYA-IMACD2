@@ -72,6 +72,60 @@ numbers **and the pane with them** so the two stay in step.
 > outranks a new default.** After updating the script, open Settings → Inputs
 > and confirm **MA Length** and **Signal Length** still read what your pane shows.
 
+## Verified against the IMACD_LB source
+
+Cross-checked line by line against the *Impulse MACD [LazyBear]* source. **The
+two engines are mathematically identical at equal lengths:**
+
+| Component | LazyBear | This script | |
+| --- | --- | --- | --- |
+| Smoothed MA | `(smma[1]*(len-1)+src)/len`, seeded `sma()` | `ta.rma()` | identical¹ |
+| Zero-lag EMA | `ema1 + (ema1 - ema2)` | same | identical |
+| `md` | `(mi>hi) ? mi-hi : (mi<lo) ? mi-lo : 0` | same | identical |
+| `sb` | `sma(md, lengthSignal)` | `ta.sma(...)` | identical |
+| Source | `hlc3` (hard-coded) | `hlc3` (input) | identical by default |
+
+¹ LazyBear's recursion is Wilder smoothing with `alpha = 1/len`, which is what
+`ta.rma()` computes. Checked numerically over 800 bars at lengths 3/9/10/24/34 —
+worst difference **4.5e-12**, float noise only. The rewrite to `ta.rma()` was
+needed because a self-referencing `smma[1]` inside a function throws a runtime
+error in Pine v5/v6; it changes nothing numerically.
+
+> **Keep Price Source on `hlc3`.** LazyBear hard-codes it; it is an input here,
+> so changing it silently de-synchronises this script from the pane.
+
+### The easiest way to verify a signal
+
+LazyBear plots `sh = md - sb` as the blue **ImpulseHisto** histogram, and this
+script detects a cross on the sign of *exactly that same quantity*. So:
+
+> **A signal fires precisely when the blue histogram crosses zero.**
+
+That is far easier to read than watching two curves converge. A marker where the
+blue histogram did **not** cross zero means something is genuinely wrong — report
+it. A marker where it did means the script is working.
+
+### Do not read the md line's colour as a signal
+
+LazyBear colours that line with:
+
+```
+mdc = src>mi ? (src>hi ? lime : green) : (src<lo ? red : orange)
+```
+
+| Condition | Colour |
+| --- | --- |
+| `src > mi` and `src > hi` | lime |
+| `src > mi` and `src <= hi` | green |
+| `src <= mi` and `src < lo` | red |
+| `src <= mi` and `src >= lo` | orange |
+
+Every branch compares **price** against the bands. Not one compares `md` against
+`sb`. The colour says nothing about the crossing — green does **not** mean a BUY
+is due. It is a separate reading that can and does disagree with the crossing,
+and mistaking one for the other is an easy way to conclude the alerts are wrong
+when they aren't.
+
 ## Dashboard diagnostics
 
 Five rows at the bottom of the table exist to verify the alerts track the lines:

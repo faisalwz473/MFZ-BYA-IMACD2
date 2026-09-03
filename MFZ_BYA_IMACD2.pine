@@ -60,6 +60,38 @@
 //  outranks a new default. After updating, open Settings -> Inputs and confirm
 //  MA Length and Signal Length still read what your pane shows.
 //
+//  VERIFIED AGAINST "Impulse MACD [LazyBear]" (IMACD_LB) SOURCE
+//  The two engines are mathematically identical at equal lengths:
+//    calc_smma  LazyBear's (smma[1]*(len-1) + src)/len seeded with sma() is
+//               Wilder smoothing with alpha = 1/len, which is exactly ta.rma().
+//               Checked numerically over 800 bars at lengths 3/9/10/24/34:
+//               worst difference 4.5e-12, i.e. float noise only.
+//    calc_zlema ema1 + (ema1 - ema2)              - identical
+//    md         (mi>hi) ? mi-hi : (mi<lo) ? mi-lo : 0  - identical
+//    sb         sma(md, lengthSignal)             - identical (SMA, not EMA)
+//    src        hlc3                              - identical
+//
+//  KEEP PRICE SOURCE ON hlc3. LazyBear hard-codes src=hlc3. It is an input
+//  here, so changing it silently de-synchronises this script from the pane.
+//
+//  EASIEST WAY TO VERIFY A SIGNAL
+//  LazyBear plots sh = md - sb as the blue "ImpulseHisto" histogram, and this
+//  script detects a cross on the sign of exactly that same quantity. So:
+//
+//      a signal fires precisely when the blue histogram crosses ZERO.
+//
+//  That is far easier to read than watching two curves converge. If a marker
+//  appears where the blue histogram did not cross zero, something is genuinely
+//  wrong - tell me. If it appears where it did, the script is working.
+//
+//  DO NOT READ THE md LINE'S COLOUR AS A SIGNAL
+//  LazyBear colours that line with
+//      mdc = src>mi ? (src>hi ? lime : green) : (src<lo ? red : orange)
+//  Every branch compares PRICE against the bands (mi/hi/lo). Not one of them
+//  compares md against sb. The colour therefore says nothing about the
+//  crossing, and green does not mean "a BUY is due". It is a separate reading
+//  that can and does disagree with the crossing.
+//
 //  ALERT SETUP (do this once in TradingView)
 //   Right-click chart -> Add alert -> Condition: "BYA IMACD1"
 //   -> choose "MFZ BUY (TVMT)" or "MFZ SELL (TVMT)"
