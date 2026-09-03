@@ -42,12 +42,14 @@ that do the same job made it easy to flip twice and land back where you started.
 
 ## Match the lengths to your pane indicator
 
-**This was the actual cause of the misalignment.**
+**This was the cause of the misalignment.** The overlay was running MA Length 10
+/ Signal Length 3 while the lower pane read `IMACD_LB 24 9` — a different, much
+faster pair of lines. The two indicators were producing genuinely different
+crossings, so the alerts could never line up with the pane no matter what else
+was changed.
 
-A lower-pane legend reading `IMACD_LB 24 9` is running **MA Length 24, Signal
-Length 9**. The overlay was defaulting to **10 / 3** — a different, much faster
-pair of lines. The crossings the two indicators produce are simply not the same
-events, so the alerts could never line up with the pane no matter what.
+Read the pane legend and set the same two numbers here. `IMACD_LB 10 3` means MA
+Length 10, Signal Length 3. The defaults are **10 / 3** to match that.
 
 `sb` is a moving average **of** `md`, so a short Signal Length glues it to `md`
 and the two cross on nearly every wiggle. Measured over 591 bars of gold-like
@@ -55,25 +57,20 @@ synthetic data:
 
 | MA / Signal | Crossings | One signal per | |
 | --- | --- | --- | --- |
-| 10 / 3 | 101 | ~6 bars | *old default* |
+| **10 / 3** | **101** | **~6 bars** | **default — matches `IMACD_LB 10 3`** |
 | 12 / 6 | 55 | ~11 bars | |
 | 21 / 7 | 27 | ~22 bars | |
-| **24 / 9** | **23** | **~25 bars** | **new default — matches `IMACD_LB 24 9`** |
+| 24 / 9 | 23 | ~25 bars | |
 | 34 / 9 | 16 | ~35 bars | LazyBear stock |
 
-At 10/3 the script fired about **4.4× more often** than a 24/9 pane shows
-crossings — which is exactly what the chart showed: roughly ten BUY/SELL labels
-on price against about four crossings in the pane over the same window. The
-engine was never ignoring the crossings; it was reading a different pair of
-lines and catching every small one.
+10/3 is the fastest of these and fires roughly **4.4× more often** than 24/9.
+That is a deliberate choice, not a fault — but it does mean plenty of small
+crossings alongside the big swings. To trade fewer, larger moves, raise both
+numbers **and the pane with them** so the two stay in step.
 
 > **TradingView stores input values in the saved chart layout, and a saved value
 > outranks a new default.** After updating the script, open Settings → Inputs
-> and confirm **MA Length** and **Signal Length** actually read **24** and **9**.
-> If they still say 10 and 3, set them by hand or reset the indicator to
-> defaults.
-
-Whatever numbers your pane indicator uses, the overlay must use the same ones.
+> and confirm **MA Length** and **Signal Length** still read what your pane shows.
 
 ## Dashboard diagnostics
 

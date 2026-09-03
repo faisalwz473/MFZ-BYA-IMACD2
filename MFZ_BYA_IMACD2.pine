@@ -38,25 +38,27 @@
 //  This script is an OVERLAY, so md and sb are not drawn on it (Pine cannot
 //  plot into a lower pane from an overlay script). The crossings you read off
 //  a lower-pane Impulse MACD are only the same crossings this script fires on
-//  if BOTH use the same lengths.
+//  if BOTH use the same lengths. This is the single most common reason the
+//  markers appear not to follow the lines.
 //
-//  A pane legend reading "IMACD_LB 24 9" is running MA Length 24, Signal
-//  Length 9. The defaults here are now 24 and 9 to match it.
+//  Read the pane legend: "IMACD_LB 10 3" means MA Length 10, Signal Length 3.
+//  Whatever it says, set the same two numbers here. The defaults are 10 and 3
+//  to match a pane running IMACD_LB 10 3.
 //
 //  The lengths matter enormously, because sb is a moving average OF md - a
 //  short Signal Length glues it to md and the two cross on nearly every wiggle.
 //  Measured over 591 bars of gold-like data:
-//      MA/Signal 10/3  -> 101 crossings, one every ~6 bars
+//      MA/Signal 10/3  -> 101 crossings, one every ~6 bars   (default here)
 //      MA/Signal 12/6  ->  55 crossings, one every ~11 bars
-//      MA/Signal 24/9  ->  23 crossings, one every ~25 bars  (matches IMACD_LB 24 9)
+//      MA/Signal 24/9  ->  23 crossings, one every ~25 bars
 //      MA/Signal 34/9  ->  16 crossings, one every ~35 bars  (LazyBear stock)
-//  So the old 10/3 default fired about 4.4x more often than a 24/9 pane shows
-//  crossings. The engine was never ignoring the crossings - it was reading a
-//  different, much faster pair of lines and catching every small one.
+//  10/3 is the fastest of these and fires about 4.4x more often than 24/9.
+//  That is a deliberate choice, not a fault: raise both numbers together (and
+//  the pane with them) if you want fewer, larger swings.
 //
 //  TradingView stores input values in the saved chart layout, and a saved value
 //  outranks a new default. After updating, open Settings -> Inputs and confirm
-//  MA Length and Signal Length actually read 24 and 9.
+//  MA Length and Signal Length still read what your pane shows.
 //
 //  ALERT SETUP (do this once in TradingView)
 //   Right-click chart -> Add alert -> Condition: "BYA IMACD1"
@@ -86,8 +88,8 @@ G_DASH  = "5 - Win Rate Dashboard"
 // -----------------------------------------------------------------------------
 //  1. SIGNAL ENGINE INPUTS
 // -----------------------------------------------------------------------------
-lengthMA     = input.int(24, "MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Impulse MACD length - drives the md line (the blue/green line in a lower-pane Impulse MACD).\n\nThis MUST match the pane indicator you are reading the crossings off. A pane showing IMACD_LB 24 9 is running MA Length 24, so 24 is the default here. Set to 34 for LazyBear stock settings.", display = display.none)
-lengthSignal = input.int(9, "Signal Length (fast line)", minval = 1, group = G_SIG, tooltip = "Signal line length - drives the sb line (the orange line in a lower-pane Impulse MACD).\n\nThis MUST match the pane indicator you are reading the crossings off. A pane showing IMACD_LB 24 9 is running Signal Length 9, so 9 is the default here.\n\nsb is a moving average OF md, so a short length glues it to md and the two cross on almost every wiggle: 3 gives roughly one signal every 6 bars, 9 roughly one every 25. Watch the 'One Signal Per' row on the dashboard while you tune it.", display = display.none)
+lengthMA     = input.int(10, "MA Length (slow line)", minval = 1, group = G_SIG, tooltip = "Impulse MACD length - drives the md line (the blue/green line in a lower-pane Impulse MACD).\n\nThis MUST match the pane indicator you are reading the crossings off. A pane showing IMACD_LB 10 3 is running MA Length 10, so 10 is the default here. Set to 34 for LazyBear stock settings.", display = display.none)
+lengthSignal = input.int(3, "Signal Length (fast line)", minval = 1, group = G_SIG, tooltip = "Signal line length - drives the sb line (the orange line in a lower-pane Impulse MACD).\n\nThis MUST match the pane indicator you are reading the crossings off. A pane showing IMACD_LB 10 3 is running Signal Length 3, so 3 is the default here.\n\nsb is a moving average OF md, so a short length glues it to md and the two cross on almost every wiggle: 3 gives roughly one signal every 6 bars, 9 roughly one every 25. Watch the 'One Signal Per' row on the dashboard while you tune it.", display = display.none)
 srcInput     = input.source(hlc3, "Price Source", group = G_SIG, display = display.none)
 signalMode   = input.string("MACD crosses Signal Line (standard)", "Which Cross Is A BUY", options = ["MACD crosses Signal Line (standard)", "Signal Line crosses MACD (reversed)"], group = G_SIG, tooltip = "There is only ONE crossing event between the two lines. This setting decides which side of it is called BUY.\n\nMACD crosses Signal Line (standard): md crossing UP through sb = BUY. This is the normal reading and follows price direction - sb is an average of md, so md rising above it means momentum is turning up.\n\nSignal Line crosses MACD (reversed): the exact same crossings with BUY and SELL swapped. Use this only if every marker on your chart sits on the wrong side.", display = display.none)
 
