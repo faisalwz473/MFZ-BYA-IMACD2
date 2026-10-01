@@ -70,3 +70,28 @@ Top-right table. It makes no signals of its own — it replays the indicator's o
 same SL / TP levels bar by bar across loaded history. SL before TP1 = Loss, TP1 or better = Win.
 It recalculates automatically when any input or the timeframe changes. It is a quick overview, not a
 tick-precise backtester: when one bar touches both sides, the order is estimated from the bar open/high/low.
+
+---
+
+# MT5 Expert Advisor — Stochastic 21 / 3 / 5 cross
+
+`mt5/MFZ_Stochastic_Cross_EA.mq5` trades the %K / %D crossover of Stochastic (21, 3, 5) on **M5**.
+
+| Event (on a closed M5 bar) | Action |
+|---|---|
+| %K crosses **up** through %D | close any SELL (its take profit) → open **BUY** |
+| %K crosses **down** through %D | close any BUY (its take profit) → open **SELL** |
+
+- Signals use the **last closed bar** only, so a trade is never triggered by a cross that later disappears.
+- The signal timeframe is an input (default `M5`), so the EA can sit on any chart.
+- One position per direction, tracked by **Magic number** — other EAs and manual trades are not touched.
+- If a close fails, the opposite entry is skipped so you never end up hedged by accident.
+- Inputs: Stochastic K/D/Slowing, MA method, price field, lot size, trade direction (both / buy only / sell only),
+  optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
+  max spread filter, slippage, magic, comment.
+
+## Install
+1. MT5 → **File → Open Data Folder** → `MQL5/Experts/` → copy `MFZ_Stochastic_Cross_EA.mq5` there.
+2. Open it in **MetaEditor** and press **Compile** (F7).
+3. In MT5 Navigator → Expert Advisors, drag the EA onto a chart, enable **Algo Trading**.
+4. Test first in the **Strategy Tester** (Ctrl+R), model "Every tick based on real ticks", timeframe M5.
