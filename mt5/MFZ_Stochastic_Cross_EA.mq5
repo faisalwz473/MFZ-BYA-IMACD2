@@ -2,12 +2,20 @@
 //|                                     MFZ_Stochastic_Cross_EA.mq5 |
 //|  Stochastic (21, 3, 5) %K / %D crossover Expert Advisor for MT5  |
 //|                                                                  |
-//|  Rules (evaluated on the CLOSED bar of the signal timeframe, M5):|
+//|  Rules (signal timeframe, default M5):                           |
 //|   - %K crosses UP   %D -> close SELL (take profit) + open BUY    |
 //|   - %K crosses DOWN %D -> close BUY  (take profit) + open SELL   |
+//|                                                                  |
+//|  Entry mode:                                                     |
+//|   - Bar close : act on a cross confirmed by a CLOSED candle       |
+//|   - Instant   : act the moment %K crosses %D inside the candle    |
+//|  Zone filter (optional, entries only):                           |
+//|   - BUY  only if the cross happens at or below the Buy zone      |
+//|   - SELL only if the cross happens at or above the Sell zone     |
+//|   Exits always happen on every opposite cross.                   |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.00"
+#property version   "1.10"
 
 #include <Trade\Trade.mqh>
 
@@ -18,6 +26,12 @@ enum ENUM_TRADE_DIRECTION
    DIR_SELL_ONLY = 2  // Sell only
   };
 
+enum ENUM_ENTRY_MODE
+  {
+   ENTRY_BAR_CLOSE = 0, // Bar close (confirmed cross)
+   ENTRY_INSTANT   = 1  // Instant (cross inside the candle)
+  };
+
 //--- Signal
 input group "Stochastic signal"
 input ENUM_TIMEFRAMES InpTimeframe   = PERIOD_M5;    // Signal timeframe
@@ -26,6 +40,13 @@ input int             InpDPeriod     = 3;            // %D period
 input int             InpSlowing     = 5;            // Slowing
 input ENUM_MA_METHOD  InpMaMethod    = MODE_SMA;     // MA method
 input ENUM_STO_PRICE  InpPriceField  = STO_LOWHIGH;  // Price field
+input ENUM_ENTRY_MODE InpEntryMode   = ENTRY_BAR_CLOSE; // Entry mode
+
+//--- Zone filter
+input group "Zone filter (entries only, exits always on cross)"
+input bool            InpUseZone     = false;        // Use zone filter
+input double          InpBuyZone     = 30.0;         // BUY only if cross is at or below this level
+input double          InpSellZone    = 70.0;         // SELL only if cross is at or above this level
 
 //--- Trading
 input group "Trading"
@@ -42,7 +63,9 @@ input string          InpComment     = "MFZ Stoch 21-3-5"; // Order comment
 //--- Globals
 CTrade   trade;
 int      g_stoch = INVALID_HANDLE;
-datetime g_lastBarTime = 0;
+datetime g_lastBarTime  = 0;   // Bar close mode: last bar processed
+int      g_lastSign     = 0;   // Instant mode: last seen side of %K vs %D (+1 above, -1 below)
+datetime g_lastEntryBar = 0;   // Instant mode: candle of the last entry (max one entry per candle)
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -55,6 +78,11 @@ int OnInit()
    if(InpLots <= 0.0)
      {
       Print("Lot size must be greater than zero");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+   if(InpUseZone && (InpBuyZone < 0.0 || InpBuyZone > 100.0 || InpSellZone < 0.0 || InpSellZone > 100.0))
+     {
+      Print("Zone levels must be between 0 and 100");
       return(INIT_PARAMETERS_INCORRECT);
      }
 
@@ -70,8 +98,10 @@ int OnInit()
    trade.SetDeviationInPoints(InpSlippagePts);
    trade.SetTypeFillingBySymbol(_Symbol);
 
-   // Do not trade the bar that is already closed when the EA is attached.
-   g_lastBarTime = iTime(_Symbol, InpTimeframe, 0);
+   // Do not trade a cross that already happened before the EA was attached.
+   g_lastBarTime  = iTime(_Symbol, InpTimeframe, 0);
+   g_lastSign     = 0;
+   g_lastEntryBar = 0;
    return(INIT_SUCCEEDED);
   }
 
@@ -85,43 +115,36 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
-   //--- act once per new bar of the signal timeframe
    datetime barTime = iTime(_Symbol, InpTimeframe, 0);
-   if(barTime == 0 || barTime == g_lastBarTime)
+   if(barTime == 0)
       return;
 
-   int signal = 0;
-   if(!GetCrossSignal(signal))
-      return; // data not ready yet - retry on the next tick
+   int    signal = 0;
+   double level  = 0.0;
 
-   g_lastBarTime = barTime;
-   if(signal == 0)
-      return;
+   if(InpEntryMode == ENTRY_INSTANT)
+     {
+      if(!GetInstantSignal(signal, level))
+         return;
+     }
+   else
+     {
+      if(barTime == g_lastBarTime)
+         return;                          // act once per new candle
+      if(!GetClosedBarSignal(signal, level))
+         return;                          // data not ready - retry on the next tick
+      g_lastBarTime = barTime;
+     }
 
-   bool closedAny = false;
-   if(signal > 0)   // %K crossed UP through %D
-     {
-      // TP for sells; never open a buy while a sell failed to close
-      if(!ClosePositions(POSITION_TYPE_SELL, closedAny))
-         return;
-      if(InpDirection != DIR_SELL_ONLY && (InpReverse || !closedAny))
-         OpenPosition(ORDER_TYPE_BUY);
-     }
-   else             // %K crossed DOWN through %D
-     {
-      // TP for buys; never open a sell while a buy failed to close
-      if(!ClosePositions(POSITION_TYPE_BUY, closedAny))
-         return;
-      if(InpDirection != DIR_BUY_ONLY && (InpReverse || !closedAny))
-         OpenPosition(ORDER_TYPE_SELL);
-     }
+   if(signal != 0)
+      HandleSignal(signal, level, barTime);
   }
 
 //+------------------------------------------------------------------+
-//| +1 = %K crossed up %D on the last closed bar, -1 = crossed down  |
-//| Uses closed bars only, so the signal never repaints.             |
+//| Bar close mode: +1 / -1 when %K crossed %D on the last CLOSED    |
+//| candle. level = %D at that candle (where the cross happened).     |
 //+------------------------------------------------------------------+
-bool GetCrossSignal(int &signal)
+bool GetClosedBarSignal(int &signal, double &level)
   {
    signal = 0;
    const int depth = 12;
@@ -132,11 +155,12 @@ bool GetCrossSignal(int &signal)
    if(CopyBuffer(g_stoch, MAIN_LINE,   0, depth, k) != depth) return(false);
    if(CopyBuffer(g_stoch, SIGNAL_LINE, 0, depth, d) != depth) return(false);
 
-   double curr = k[1] - d[1];             // last closed bar
+   level = d[1];
+   double curr = k[1] - d[1];             // last closed candle
    if(curr == 0.0)
       return(true);                       // touching, not crossed yet
 
-   // previous non-zero difference (handles bars where %K == %D exactly)
+   // previous non-zero difference (handles candles where %K == %D exactly)
    double prev = 0.0;
    for(int i = 2; i < depth && prev == 0.0; i++)
       prev = k[i] - d[i];
@@ -148,6 +172,83 @@ bool GetCrossSignal(int &signal)
    else if(prev > 0.0 && curr < 0.0)
       signal = -1;
    return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Instant mode: +1 / -1 the moment %K moves to the other side of   |
+//| %D on the forming candle. Every side change is reported, so a    |
+//| cross that reverses inside the candle exits the trade at once.    |
+//+------------------------------------------------------------------+
+bool GetInstantSignal(int &signal, double &level)
+  {
+   signal = 0;
+   double k[], d[];
+   if(CopyBuffer(g_stoch, MAIN_LINE,   0, 1, k) != 1) return(false);
+   if(CopyBuffer(g_stoch, SIGNAL_LINE, 0, 1, d) != 1) return(false);
+
+   level = d[0];
+   double diff = k[0] - d[0];
+   if(diff == 0.0)
+      return(true);
+   int sign = (diff > 0.0) ? 1 : -1;
+
+   if(g_lastSign == 0)
+     {
+      g_lastSign = sign;                  // first reading after start: no trade
+      return(true);
+     }
+   if(sign != g_lastSign)
+     {
+      g_lastSign = sign;
+      signal     = sign;
+     }
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Exit on every cross, then enter if all filters allow it.         |
+//+------------------------------------------------------------------+
+void HandleSignal(const int signal, const double level, const datetime barTime)
+  {
+   bool closedAny = false;
+   ENUM_POSITION_TYPE exitType = (signal > 0) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+   string dirText = (signal > 0) ? "BUY" : "SELL";
+
+   // Take profit / exit for the opposite trade. Never open a new trade
+   // while the old one failed to close.
+   if(!ClosePositions(exitType, closedAny))
+      return;
+
+   if(signal > 0 && InpDirection == DIR_SELL_ONLY) return;
+   if(signal < 0 && InpDirection == DIR_BUY_ONLY)  return;
+   if(!InpReverse && closedAny)                    return;
+
+   if(InpUseZone)
+     {
+      if(signal > 0 && level > InpBuyZone)
+        {
+         PrintFormat("BUY skipped by zone filter: cross at %.1f is above %.1f", level, InpBuyZone);
+         return;
+        }
+      if(signal < 0 && level < InpSellZone)
+        {
+         PrintFormat("SELL skipped by zone filter: cross at %.1f is below %.1f", level, InpSellZone);
+         return;
+        }
+     }
+
+   if(InpEntryMode == ENTRY_INSTANT && g_lastEntryBar == barTime)
+     {
+      PrintFormat("%s skipped: already entered once in this candle", dirText);
+      return;
+     }
+
+   if(OpenPosition(signal > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL))
+     {
+      g_lastEntryBar = barTime;
+      PrintFormat("%s opened (%s mode), cross at %.1f", dirText,
+                  InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", level);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -192,7 +293,9 @@ bool ClosePositions(const ENUM_POSITION_TYPE type, bool &closedAny)
   }
 
 //+------------------------------------------------------------------+
-void OpenPosition(const ENUM_ORDER_TYPE type)
+//| Returns true only when a new position was opened.                |
+//+------------------------------------------------------------------+
+bool OpenPosition(const ENUM_ORDER_TYPE type)
   {
    //--- one position per direction at a time
    ENUM_POSITION_TYPE ptype = (type == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
@@ -200,7 +303,7 @@ void OpenPosition(const ENUM_ORDER_TYPE type)
      {
       ulong ticket = PositionGetTicket(i);
       if(IsOurPosition(ticket) && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == ptype)
-         return;
+         return(false);
      }
 
    if(InpMaxSpreadPts > 0)
@@ -209,13 +312,13 @@ void OpenPosition(const ENUM_ORDER_TYPE type)
       if(spread > InpMaxSpreadPts)
         {
          PrintFormat("Entry skipped: spread %I64d > max %d points", spread, InpMaxSpreadPts);
-         return;
+         return(false);
         }
      }
 
    double lots = NormalizeLots(InpLots);
    if(lots <= 0.0)
-      return;
+      return(false);
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -227,7 +330,10 @@ void OpenPosition(const ENUM_ORDER_TYPE type)
       if(InpStopLossPts   > 0) sl = NormalizeDouble(price - InpStopLossPts   * point, digits);
       if(InpTakeProfitPts > 0) tp = NormalizeDouble(price + InpTakeProfitPts * point, digits);
       if(!trade.Buy(lots, _Symbol, price, sl, tp, InpComment))
+        {
          PrintFormat("BUY failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
+         return(false);
+        }
      }
    else
      {
@@ -235,8 +341,12 @@ void OpenPosition(const ENUM_ORDER_TYPE type)
       if(InpStopLossPts   > 0) sl = NormalizeDouble(price + InpStopLossPts   * point, digits);
       if(InpTakeProfitPts > 0) tp = NormalizeDouble(price - InpTakeProfitPts * point, digits);
       if(!trade.Sell(lots, _Symbol, price, sl, tp, InpComment))
+        {
          PrintFormat("SELL failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
+         return(false);
+        }
      }
+   return(true);
   }
 
 //+------------------------------------------------------------------+

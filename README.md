@@ -82,7 +82,12 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
 | %K crosses **up** through %D | close any SELL (its take profit) → open **BUY** |
 | %K crosses **down** through %D | close any BUY (its take profit) → open **SELL** |
 
-- Signals use the **last closed bar** only, so a trade is never triggered by a cross that later disappears.
+- **Entry mode** input:
+  - `Bar close` (default): acts on a cross confirmed by a **closed** M5 candle; entry at the next candle's open. No false crosses, ~1 candle later.
+  - `Instant`: acts the moment %K crosses %D **inside** the forming candle. Faster, but a cross that reverses inside the
+    candle exits the trade straight away. Max **one entry per candle** to limit whipsaw; exits are never blocked.
+- **Zone filter** (off by default, entries only): BUY only if the cross happens at or below `Buy zone` (default 30),
+  SELL only if at or above `Sell zone` (default 70). The level used is %D at the cross. Exits still happen on every cross.
 - The signal timeframe is an input (default `M5`), so the EA can sit on any chart.
 - One position per direction, tracked by **Magic number** — other EAs and manual trades are not touched.
 - If a close fails, the opposite entry is skipped so you never end up hedged by accident.
@@ -95,3 +100,13 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
 2. Open it in **MetaEditor** and press **Compile** (F7).
 3. In MT5 Navigator → Expert Advisors, drag the EA onto a chart, enable **Algo Trading**.
 4. Test first in the **Strategy Tester** (Ctrl+R), model "Every tick based on real ticks", timeframe M5.
+
+## Comparing the modes in the Strategy Tester
+Use **Every tick based on real ticks** — Instant mode is meaningless on "1 minute OHLC" or "Open prices only".
+
+Quickest way: one optimization run covering all 4 combinations.
+1. Strategy Tester → Settings: Expert = this EA, XAUUSD, M5, last 3 months, **Optimization = Slow complete algorithm**.
+2. Inputs tab: tick the box next to **Entry mode** (Start = Bar close, Stop = Instant) and **Use zone filter** (false → true).
+   Leave every other input unticked.
+3. Start. The **Optimization Results** tab lists one row per combination with profit, drawdown, trades and profit factor.
+4. Double-click a row to run that combination as a single test and see its trades.
