@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                     MFZ_Stochastic_Cross_EA.mq5 |
-//|  Stochastic (21, 3, 5) %K / %D crossover Expert Advisor for MT5  |
+//|  Stochastic (10, 3, 3) %K / %D crossover Expert Advisor for MT5  |
 //|                                                                  |
 //|  Rules (signal timeframe, default M5):                           |
 //|   - %K crosses UP   %D -> close SELL (take profit) + open BUY    |
@@ -13,9 +13,18 @@
 //|   - BUY  only if the cross happens at or below the Buy zone      |
 //|   - SELL only if the cross happens at or above the Sell zone     |
 //|   Exits always happen on every opposite cross.                   |
+//|                                                                  |
+//|  Protection filters (all optional):                              |
+//|   - Daily loss limit / daily profit target -> close all and stop  |
+//|     trading for the rest of the day                               |
+//|   - Trading hours (server time), optional close outside hours     |
+//|   - Friday close (weekend gap protection)                         |
+//|   - News filter: no new entries around high-impact news, optional |
+//|     close before news (live/demo only - the Strategy Tester has   |
+//|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.10"
+#property version   "1.20"
 
 #include <Trade\Trade.mqh>
 
@@ -35,9 +44,9 @@ enum ENUM_ENTRY_MODE
 //--- Signal
 input group "Stochastic signal"
 input ENUM_TIMEFRAMES InpTimeframe   = PERIOD_M5;    // Signal timeframe
-input int             InpKPeriod     = 21;           // %K period
+input int             InpKPeriod     = 10;           // %K period
 input int             InpDPeriod     = 3;            // %D period
-input int             InpSlowing     = 5;            // Slowing
+input int             InpSlowing     = 3;            // Slowing
 input ENUM_MA_METHOD  InpMaMethod    = MODE_SMA;     // MA method
 input ENUM_STO_PRICE  InpPriceField  = STO_LOWHIGH;  // Price field
 input ENUM_ENTRY_MODE InpEntryMode   = ENTRY_BAR_CLOSE; // Entry mode
@@ -52,13 +61,35 @@ input double          InpSellZone    = 70.0;         // SELL only if cross is at
 input group "Trading"
 input ENUM_TRADE_DIRECTION InpDirection = DIR_BOTH;  // Trade direction
 input double          InpLots        = 0.01;         // Lot size
-input int             InpStopLossPts = 0;            // Safety stop loss in points (0 = off)
+input int             InpStopLossPts = 1500;         // Safety stop loss in points (0 = off; XAUUSD 1500 = $15 move)
 input int             InpTakeProfitPts = 0;          // Safety take profit in points (0 = off, exit on cross)
 input bool            InpReverse     = true;         // Open the opposite trade on the same cross that exits
 input int             InpMaxSpreadPts = 0;           // Max spread in points for new entries (0 = off)
 input int             InpSlippagePts = 20;           // Max slippage in points
 input ulong           InpMagic       = 21305;        // Magic number
-input string          InpComment     = "MFZ Stoch 21-3-5"; // Order comment
+input string          InpComment     = "MFZ Stoch"; // Order comment
+
+//--- Daily protection
+input group "Daily protection (account currency, 0 = off)"
+input double          InpDailyLossLimit  = 0.0;     // Daily loss limit: close all + stop for the day
+input double          InpDailyProfitTarget = 0.0;   // Daily profit target: close all + stop for the day
+
+//--- Trading hours
+input group "Trading hours (broker server time)"
+input bool            InpUseHours    = false;        // Use trading hours
+input int             InpStartHour   = 10;           // Start hour (0-23)
+input int             InpEndHour     = 22;           // End hour (0-23, no new entries from this hour)
+input bool            InpCloseOutsideHours = false;  // Close open trades outside trading hours
+input int             InpFridayCloseHour = 0;        // Friday: close all + stop from this hour (0 = off)
+
+//--- News filter
+input group "News filter (live/demo only, not in Strategy Tester)"
+input bool            InpUseNews     = false;        // Use news filter
+input string          InpNewsCurrencies = "USD";     // Currencies to watch (comma separated)
+input bool            InpNewsMedium  = false;        // Also block medium-impact news
+input int             InpNewsBeforeMin = 30;         // Block entries this many minutes before news
+input int             InpNewsAfterMin  = 30;         // Block entries this many minutes after news
+input bool            InpNewsCloseBefore = true;     // Close open trades when the before-news window starts
 
 //--- Globals
 CTrade   trade;
@@ -66,6 +97,14 @@ int      g_stoch = INVALID_HANDLE;
 datetime g_lastBarTime  = 0;   // Bar close mode: last bar processed
 int      g_lastSign     = 0;   // Instant mode: last seen side of %K vs %D (+1 above, -1 below)
 datetime g_lastEntryBar = 0;   // Instant mode: candle of the last entry (max one entry per candle)
+datetime g_lockedDay    = 0;   // day on which the daily limit was hit (no more trading that day)
+datetime g_lastRiskCheck = 0;  // throttle for the daily P/L check (once per second)
+string   g_newsCurrencies[];   // parsed InpNewsCurrencies
+bool     g_newsEnabled  = false;
+datetime g_newsCheckTime = 0;  // news window is refreshed once per minute
+bool     g_newsBlock    = false; // inside a news window
+bool     g_newsUpcoming = false; // the window is before an event (not after)
+string   g_newsTitle    = "";
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -85,6 +124,42 @@ int OnInit()
       Print("Zone levels must be between 0 and 100");
       return(INIT_PARAMETERS_INCORRECT);
      }
+
+   if(InpUseHours && (InpStartHour < 0 || InpStartHour > 23 || InpEndHour < 0 || InpEndHour > 23))
+     {
+      Print("Trading hours must be between 0 and 23");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   //--- news filter setup
+   g_newsEnabled = false;
+   ArrayResize(g_newsCurrencies, 0);
+   if(InpUseNews)
+     {
+      if(MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
+         Print("News filter is not available in the Strategy Tester - it is ignored in this test");
+      else
+        {
+         string parts[];
+         int n = StringSplit(InpNewsCurrencies, ',', parts);
+         for(int i = 0; i < n; i++)
+           {
+            string c = parts[i];
+            StringTrimLeft(c);
+            StringTrimRight(c);
+            StringToUpper(c);
+            if(StringLen(c) == 0)
+               continue;
+            int sz = ArraySize(g_newsCurrencies);
+            ArrayResize(g_newsCurrencies, sz + 1);
+            g_newsCurrencies[sz] = c;
+           }
+         g_newsEnabled = (ArraySize(g_newsCurrencies) > 0);
+        }
+     }
+   g_newsCheckTime = 0;
+   g_newsBlock     = false;
+   g_newsUpcoming  = false;
 
    g_stoch = iStochastic(_Symbol, InpTimeframe, InpKPeriod, InpDPeriod, InpSlowing,
                          InpMaMethod, InpPriceField);
@@ -115,6 +190,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   ManageProtection();
+
    datetime barTime = iTime(_Symbol, InpTimeframe, 0);
    if(barTime == 0)
       return;
@@ -223,6 +300,13 @@ void HandleSignal(const int signal, const double level, const datetime barTime)
    if(signal < 0 && InpDirection == DIR_BUY_ONLY)  return;
    if(!InpReverse && closedAny)                    return;
 
+   string blocked = EntryBlockReason();
+   if(blocked != "")
+     {
+      PrintFormat("%s skipped: %s", dirText, blocked);
+      return;
+     }
+
    if(InpUseZone)
      {
       if(signal > 0 && level > InpBuyZone)
@@ -249,6 +333,203 @@ void HandleSignal(const int signal, const double level, const datetime barTime)
       PrintFormat("%s opened (%s mode), cross at %.1f", dirText,
                   InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", level);
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Protection that runs on every tick: daily limits, hours, Friday, |
+//| news. Closes trades when a rule says so.                          |
+//+------------------------------------------------------------------+
+void ManageProtection()
+  {
+   datetime now = TimeCurrent();
+   if(now == 0)
+      return;
+
+   //--- daily loss limit / profit target (checked once per second)
+   if((InpDailyLossLimit > 0.0 || InpDailyProfitTarget > 0.0) && now != g_lastRiskCheck)
+     {
+      g_lastRiskCheck = now;
+      datetime today = DayStart(now);
+      if(g_lockedDay != today)
+        {
+         double pnl = TodayPnL(today, now);
+         string why = "";
+         if(InpDailyLossLimit > 0.0 && pnl <= -InpDailyLossLimit)
+            why = StringFormat("daily loss limit hit (%.2f)", pnl);
+         else if(InpDailyProfitTarget > 0.0 && pnl >= InpDailyProfitTarget)
+            why = StringFormat("daily profit target reached (%.2f)", pnl);
+         if(why != "")
+           {
+            g_lockedDay = today;
+            PrintFormat("%s - closing all trades, no new trades until tomorrow", why);
+            CloseAll();
+           }
+        }
+     }
+
+   //--- trading hours / Friday close
+   if(InpUseHours && InpCloseOutsideHours && !InSession(now))
+      CloseAll();
+   if(IsFridayClose(now))
+      CloseAll();
+
+   //--- news
+   if(g_newsEnabled)
+     {
+      UpdateNewsWindow();
+      if(g_newsBlock && g_newsUpcoming && InpNewsCloseBefore)
+         CloseAll();
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| "" if a new entry is allowed, otherwise the reason it is not.    |
+//+------------------------------------------------------------------+
+string EntryBlockReason()
+  {
+   datetime now = TimeCurrent();
+   if(g_lockedDay != 0 && g_lockedDay == DayStart(now))
+      return("daily limit reached - trading stopped for today");
+   if(InpUseHours && !InSession(now))
+      return("outside trading hours");
+   if(IsFridayClose(now))
+      return("Friday close time");
+   if(g_newsEnabled)
+     {
+      UpdateNewsWindow();
+      if(g_newsBlock)
+         return("news filter (" + g_newsTitle + ")");
+     }
+   return("");
+  }
+
+//+------------------------------------------------------------------+
+datetime DayStart(const datetime t)
+  {
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   d.hour = 0;
+   d.min  = 0;
+   d.sec  = 0;
+   return(StructToTime(d));
+  }
+
+//+------------------------------------------------------------------+
+bool InSession(const datetime t)
+  {
+   if(!InpUseHours || InpStartHour == InpEndHour)
+      return(true);
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   if(InpStartHour < InpEndHour)
+      return(d.hour >= InpStartHour && d.hour < InpEndHour);
+   return(d.hour >= InpStartHour || d.hour < InpEndHour);   // overnight session
+  }
+
+//+------------------------------------------------------------------+
+bool IsFridayClose(const datetime t)
+  {
+   if(InpFridayCloseHour <= 0)
+      return(false);
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   return(d.day_of_week == 5 && d.hour >= InpFridayCloseHour);
+  }
+
+//+------------------------------------------------------------------+
+//| Today's closed P/L for this EA plus the floating P/L of its      |
+//| open trades (profit + swap + commission + fees).                 |
+//+------------------------------------------------------------------+
+double TodayPnL(const datetime dayStart, const datetime now)
+  {
+   double pnl = 0.0;
+   if(HistorySelect(dayStart, now + 60))
+     {
+      int total = HistoryDealsTotal();
+      for(int i = 0; i < total; i++)
+        {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0)
+            continue;
+         if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+            continue;
+         if((ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic)
+            continue;
+         pnl += HistoryDealGetDouble(deal, DEAL_PROFIT)
+              + HistoryDealGetDouble(deal, DEAL_SWAP)
+              + HistoryDealGetDouble(deal, DEAL_COMMISSION)
+              + HistoryDealGetDouble(deal, DEAL_FEE);
+        }
+     }
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(IsOurPosition(ticket))
+         pnl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+   return(pnl);
+  }
+
+//+------------------------------------------------------------------+
+//| Refresh the news window from the MT5 economic calendar, at most  |
+//| once per minute. Calendar times are broker server time.          |
+//+------------------------------------------------------------------+
+void UpdateNewsWindow()
+  {
+   datetime now = TimeTradeServer();
+   if(g_newsCheckTime != 0 && now - g_newsCheckTime < 60)
+      return;
+   g_newsCheckTime = now;
+
+   string prevTitle = g_newsTitle;
+   g_newsBlock    = false;
+   g_newsUpcoming = false;
+   g_newsTitle    = "";
+
+   datetime from = now - InpNewsAfterMin * 60;
+   datetime to   = now + InpNewsBeforeMin * 60;
+
+   for(int c = 0; c < ArraySize(g_newsCurrencies); c++)
+     {
+      MqlCalendarValue values[];
+      ResetLastError();
+      if(!CalendarValueHistory(values, from, to, NULL, g_newsCurrencies[c]))
+        {
+         int err = GetLastError();
+         if(err != 0)
+            PrintFormat("News filter: calendar read failed for %s, error %d", g_newsCurrencies[c], err);
+         continue;
+        }
+      for(int i = 0; i < ArraySize(values); i++)
+        {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(values[i].event_id, ev))
+            continue;
+         bool important = (ev.importance == CALENDAR_IMPORTANCE_HIGH) ||
+                          (InpNewsMedium && ev.importance == CALENDAR_IMPORTANCE_MODERATE);
+         if(!important)
+            continue;
+
+         g_newsBlock = true;
+         g_newsTitle = g_newsCurrencies[c] + " " + ev.name + " at " +
+                       TimeToString(values[i].time, TIME_DATE | TIME_MINUTES);
+         if(values[i].time >= now)
+            g_newsUpcoming = true;
+        }
+     }
+
+   if(g_newsBlock && g_newsTitle != prevTitle)
+      Print("News filter active: ", g_newsTitle);
+   else if(!g_newsBlock && prevTitle != "")
+      Print("News filter cleared");
+  }
+
+//+------------------------------------------------------------------+
+void CloseAll()
+  {
+   bool closedAny = false;
+   ClosePositions(POSITION_TYPE_BUY,  closedAny);
+   ClosePositions(POSITION_TYPE_SELL, closedAny);
   }
 
 //+------------------------------------------------------------------+
@@ -279,7 +560,7 @@ bool ClosePositions(const ENUM_POSITION_TYPE type, bool &closedAny)
       if(trade.PositionClose(ticket, InpSlippagePts))
         {
          closedAny = true;
-         PrintFormat("Closed %s #%I64u on Stochastic cross",
+         PrintFormat("Closed %s #%I64u",
                      type == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket);
         }
       else

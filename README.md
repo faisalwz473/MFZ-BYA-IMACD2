@@ -73,9 +73,9 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
 
 ---
 
-# MT5 Expert Advisor — Stochastic 21 / 3 / 5 cross
+# MT5 Expert Advisor — Stochastic 10 / 3 / 3 cross
 
-`mt5/MFZ_Stochastic_Cross_EA.mq5` trades the %K / %D crossover of Stochastic (21, 3, 5) on **M5**.
+`mt5/MFZ_Stochastic_Cross_EA.mq5` trades the %K / %D crossover of Stochastic (10, 3, 3 by default; 21, 3, 5 was the original) on **M5**.
 
 | Event (on a closed M5 bar) | Action |
 |---|---|
@@ -94,6 +94,19 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
 - Inputs: Stochastic K/D/Slowing, MA method, price field, lot size, trade direction (both / buy only / sell only),
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
+
+## Protection filters (v1.20)
+All optional; exits on a Stochastic cross are never blocked by a filter.
+
+| Filter | Inputs | Tester |
+|---|---|---|
+| Safety stop loss | `Safety stop loss` = 1500 points by default (XAUUSD: a $15 move ≈ $15 per 0.01 lot) | yes |
+| Daily loss limit / profit target | money in account currency; when hit → close all, no new trades until the next server day | yes |
+| Trading hours | start / end hour in **broker server time**, optional close outside hours | yes |
+| Friday close | close all and stop from this hour on Friday (weekend gap protection) | yes |
+| News filter | currencies (default `USD`), high impact (+ medium optional), minutes before / after, optional close before news | **no** — MT5 has no calendar data in the Strategy Tester |
+
+The news filter reads MT5's built-in economic calendar (`Calendar` tab in the Toolbox).
 
 ## Install
 1. MT5 → **File → Open Data Folder** → `MQL5/Experts/` → copy `MFZ_Stochastic_Cross_EA.mq5` there.
