@@ -13,6 +13,7 @@
 //|   - BUY  only if the cross happens at or below the Buy zone      |
 //|   - SELL only if the cross happens at or above the Sell zone     |
 //|   Exits always happen on every opposite cross.                   |
+//|  Invert signals (optional): cross UP sells, cross DOWN buys.      |
 //|                                                                  |
 //|  Protection filters (all optional):                              |
 //|   - Daily loss limit / daily profit target -> close all and stop  |
@@ -24,7 +25,7 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.20"
+#property version   "1.30"
 
 #include <Trade\Trade.mqh>
 
@@ -61,8 +62,9 @@ input double          InpSellZone    = 70.0;         // SELL only if cross is at
 input group "Trading"
 input ENUM_TRADE_DIRECTION InpDirection = DIR_BOTH;  // Trade direction
 input double          InpLots        = 0.01;         // Lot size
-input int             InpStopLossPts = 1500;         // Safety stop loss in points (0 = off; XAUUSD 1500 = $15 move)
-input int             InpTakeProfitPts = 0;          // Safety take profit in points (0 = off, exit on cross)
+input double          InpStopLossDist = 15.0;        // Safety stop loss as PRICE distance (0 = off; XAUUSD 15.0 = $15 move)
+input double          InpTakeProfitDist = 0.0;       // Safety take profit as PRICE distance (0 = off, exit on cross)
+input bool            InpInvert      = false;        // Invert signals (cross UP = SELL, cross DOWN = BUY)
 input bool            InpReverse     = true;         // Open the opposite trade on the same cross that exits
 input int             InpMaxSpreadPts = 0;           // Max spread in points for new entries (0 = off)
 input int             InpSlippagePts = 20;           // Max slippage in points
@@ -168,6 +170,14 @@ int OnInit()
       PrintFormat("Failed to create Stochastic handle, error %d", GetLastError());
       return(INIT_FAILED);
      }
+
+   PrintFormat("%s: %d digits, point %s. Safety SL = %s price (%.0f points), TP = %s price. Signals %s.",
+               _Symbol, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS),
+               DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_POINT), 5),
+               DoubleToString(InpStopLossDist, 5),
+               InpStopLossDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT),
+               DoubleToString(InpTakeProfitDist, 5),
+               InpInvert ? "INVERTED" : "normal");
 
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippagePts);
@@ -285,8 +295,10 @@ bool GetInstantSignal(int &signal, double &level)
 //+------------------------------------------------------------------+
 //| Exit on every cross, then enter if all filters allow it.         |
 //+------------------------------------------------------------------+
-void HandleSignal(const int signal, const double level, const datetime barTime)
+void HandleSignal(const int cross, const double level, const datetime barTime)
   {
+   // cross: +1 = %K crossed UP, -1 = crossed DOWN. signal: trade direction.
+   const int signal = InpInvert ? -cross : cross;
    bool closedAny = false;
    ENUM_POSITION_TYPE exitType = (signal > 0) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
    string dirText = (signal > 0) ? "BUY" : "SELL";
@@ -307,16 +319,17 @@ void HandleSignal(const int signal, const double level, const datetime barTime)
       return;
      }
 
+   // Zone filter judges the cross itself (UP crosses low, DOWN crosses high).
    if(InpUseZone)
      {
-      if(signal > 0 && level > InpBuyZone)
+      if(cross > 0 && level > InpBuyZone)
         {
-         PrintFormat("BUY skipped by zone filter: cross at %.1f is above %.1f", level, InpBuyZone);
+         PrintFormat("%s skipped by zone filter: UP cross at %.1f is above %.1f", dirText, level, InpBuyZone);
          return;
         }
-      if(signal < 0 && level < InpSellZone)
+      if(cross < 0 && level < InpSellZone)
         {
-         PrintFormat("SELL skipped by zone filter: cross at %.1f is below %.1f", level, InpSellZone);
+         PrintFormat("%s skipped by zone filter: DOWN cross at %.1f is below %.1f", dirText, level, InpSellZone);
          return;
         }
      }
@@ -330,8 +343,9 @@ void HandleSignal(const int signal, const double level, const datetime barTime)
    if(OpenPosition(signal > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL))
      {
       g_lastEntryBar = barTime;
-      PrintFormat("%s opened (%s mode), cross at %.1f", dirText,
-                  InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", level);
+      PrintFormat("%s opened (%s mode%s), %s cross at %.1f", dirText,
+                  InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close",
+                  InpInvert ? ", inverted" : "", cross > 0 ? "UP" : "DOWN", level);
      }
   }
 
@@ -603,13 +617,16 @@ bool OpenPosition(const ENUM_ORDER_TYPE type)
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
+   double slDist = (InpStopLossDist   > 0.0) ? MathMax(InpStopLossDist,   minDist) : 0.0;
+   double tpDist = (InpTakeProfitDist > 0.0) ? MathMax(InpTakeProfitDist, minDist) : 0.0;
    double price, sl = 0.0, tp = 0.0;
 
    if(type == ORDER_TYPE_BUY)
      {
       price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(InpStopLossPts   > 0) sl = NormalizeDouble(price - InpStopLossPts   * point, digits);
-      if(InpTakeProfitPts > 0) tp = NormalizeDouble(price + InpTakeProfitPts * point, digits);
+      if(slDist > 0.0) sl = NormalizeDouble(price - slDist, digits);
+      if(tpDist > 0.0) tp = NormalizeDouble(price + tpDist, digits);
       if(!trade.Buy(lots, _Symbol, price, sl, tp, InpComment))
         {
          PrintFormat("BUY failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
@@ -619,8 +636,8 @@ bool OpenPosition(const ENUM_ORDER_TYPE type)
    else
      {
       price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(InpStopLossPts   > 0) sl = NormalizeDouble(price + InpStopLossPts   * point, digits);
-      if(InpTakeProfitPts > 0) tp = NormalizeDouble(price - InpTakeProfitPts * point, digits);
+      if(slDist > 0.0) sl = NormalizeDouble(price + slDist, digits);
+      if(tpDist > 0.0) tp = NormalizeDouble(price - tpDist, digits);
       if(!trade.Sell(lots, _Symbol, price, sl, tp, InpComment))
         {
          PrintFormat("SELL failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());

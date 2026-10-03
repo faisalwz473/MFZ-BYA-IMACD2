@@ -95,12 +95,17 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
 
+## Invert signals (v1.30)
+`Invert signals = true` trades the opposite way: %K crossing **up** opens a SELL, crossing **down** opens a BUY.
+Exits still happen on every cross. The zone filter still judges the cross itself (UP crosses low, DOWN crosses high).
+Off by default — test it in the Strategy Tester against the normal direction before using it.
+
 ## Protection filters (v1.20)
 All optional; exits on a Stochastic cross are never blocked by a filter.
 
 | Filter | Inputs | Tester |
 |---|---|---|
-| Safety stop loss | `Safety stop loss` = 1500 points by default (XAUUSD: a $15 move ≈ $15 per 0.01 lot) | yes |
+| Safety stop loss | **price distance**, default `15.0` (XAUUSD: a $15 move ≈ $15 per 0.01 lot on both 2- and 3-decimal feeds; EURUSD would be e.g. `0.0015`). Never tighter than the broker's minimum stop level | yes |
 | Daily loss limit / profit target | money in account currency; when hit → close all, no new trades until the next server day | yes |
 | Trading hours | start / end hour in **broker server time**, optional close outside hours | yes |
 | Friday close | close all and stop from this hour on Friday (weekend gap protection) | yes |
