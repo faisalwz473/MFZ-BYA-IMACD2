@@ -29,7 +29,7 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.40"
+#property version   "1.41"
 
 #include <Trade\Trade.mqh>
 
@@ -144,6 +144,13 @@ int OnInit()
    if(InpLots <= 0.0)
      {
       Print("Lot size must be greater than zero");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(InpLots < minLot - 1e-9)
+     {
+      PrintFormat("Lot size %.2f is below the minimum lot %.2f for %s - set Lot size to at least %.2f",
+                  InpLots, minLot, _Symbol, minLot);
       return(INIT_PARAMETERS_INCORRECT);
      }
    if(InpUseZone && (InpBuyZone < 0.0 || InpBuyZone > 100.0 || InpSellZone < 0.0 || InpSellZone > 100.0))
