@@ -14,6 +14,10 @@
 //|   - SELL only if the cross happens at or above the Sell zone     |
 //|   Exits always happen on every opposite cross.                   |
 //|  Invert signals (optional): cross UP sells, cross DOWN buys.      |
+//|  Trend filter (optional): only trade in the direction of the      |
+//|  higher-timeframe Stochastic (%K above %D = BUY only).            |
+//|  Stop loss: fixed price distance or ATR multiple; optional        |
+//|  break-even once a trade is X ATR in profit.                      |
 //|                                                                  |
 //|  Protection filters (all optional):                              |
 //|   - Daily loss limit / daily profit target -> close all and stop  |
@@ -25,7 +29,7 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.30"
+#property version   "1.40"
 
 #include <Trade\Trade.mqh>
 
@@ -34,6 +38,12 @@ enum ENUM_TRADE_DIRECTION
    DIR_BOTH      = 0, // Buy and Sell
    DIR_BUY_ONLY  = 1, // Buy only
    DIR_SELL_ONLY = 2  // Sell only
+  };
+
+enum ENUM_SL_MODE
+  {
+   SL_ATR   = 0, // ATR multiple (adapts to volatility)
+   SL_FIXED = 1  // Fixed price distance
   };
 
 enum ENUM_ENTRY_MODE
@@ -62,14 +72,27 @@ input double          InpSellZone    = 70.0;         // SELL only if cross is at
 input group "Trading"
 input ENUM_TRADE_DIRECTION InpDirection = DIR_BOTH;  // Trade direction
 input double          InpLots        = 0.01;         // Lot size
-input double          InpStopLossDist = 15.0;        // Safety stop loss as PRICE distance (0 = off; XAUUSD 15.0 = $15 move)
-input double          InpTakeProfitDist = 0.0;       // Safety take profit as PRICE distance (0 = off, exit on cross)
+input ENUM_SL_MODE    InpSlMode      = SL_ATR;       // Stop loss mode
+input double          InpStopLossDist = 15.0;        // Fixed mode: stop loss as PRICE distance (0 = off; XAUUSD 15.0 = $15 move)
+input double          InpTakeProfitDist = 0.0;       // Fixed mode: take profit as PRICE distance (0 = off, exit on cross)
+input int             InpAtrPeriod   = 14;           // ATR mode: ATR period (signal timeframe)
+input double          InpAtrSlMult   = 2.0;          // ATR mode: stop loss = ATR x this (0 = off)
+input double          InpAtrTpMult   = 0.0;          // ATR mode: take profit = ATR x this (0 = off, exit on cross)
+input double          InpBreakEvenAtr = 0.0;         // Move SL to entry once profit reaches ATR x this (0 = off)
 input bool            InpInvert      = false;        // Invert signals (cross UP = SELL, cross DOWN = BUY)
 input bool            InpReverse     = true;         // Open the opposite trade on the same cross that exits
 input int             InpMaxSpreadPts = 0;           // Max spread in points for new entries (0 = off)
 input int             InpSlippagePts = 20;           // Max slippage in points
 input ulong           InpMagic       = 21305;        // Magic number
 input string          InpComment     = "MFZ Stoch"; // Order comment
+
+//--- Higher-timeframe trend filter
+input group "Trend filter (higher-timeframe Stochastic)"
+input bool            InpUseHtf      = true;         // Use trend filter
+input ENUM_TIMEFRAMES InpHtfTimeframe = PERIOD_M15;  // Trend timeframe
+input int             InpHtfK        = 21;           // Trend %K period
+input int             InpHtfD        = 3;            // Trend %D period
+input int             InpHtfSlowing  = 5;            // Trend slowing
 
 //--- Daily protection
 input group "Daily protection (account currency, 0 = off)"
@@ -96,6 +119,8 @@ input bool            InpNewsCloseBefore = true;     // Close open trades when t
 //--- Globals
 CTrade   trade;
 int      g_stoch = INVALID_HANDLE;
+int      g_htf   = INVALID_HANDLE;
+int      g_atr   = INVALID_HANDLE;
 datetime g_lastBarTime  = 0;   // Bar close mode: last bar processed
 int      g_lastSign     = 0;   // Instant mode: last seen side of %K vs %D (+1 above, -1 below)
 datetime g_lastEntryBar = 0;   // Instant mode: candle of the last entry (max one entry per candle)
@@ -163,6 +188,26 @@ int OnInit()
    g_newsBlock     = false;
    g_newsUpcoming  = false;
 
+   if(InpUseHtf)
+     {
+      g_htf = iStochastic(_Symbol, InpHtfTimeframe, InpHtfK, InpHtfD, InpHtfSlowing,
+                          InpMaMethod, InpPriceField);
+      if(g_htf == INVALID_HANDLE)
+        {
+         PrintFormat("Failed to create trend Stochastic handle, error %d", GetLastError());
+         return(INIT_FAILED);
+        }
+     }
+   if(InpSlMode == SL_ATR || InpBreakEvenAtr > 0.0)
+     {
+      g_atr = iATR(_Symbol, InpTimeframe, MathMax(InpAtrPeriod, 1));
+      if(g_atr == INVALID_HANDLE)
+        {
+         PrintFormat("Failed to create ATR handle, error %d", GetLastError());
+         return(INIT_FAILED);
+        }
+     }
+
    g_stoch = iStochastic(_Symbol, InpTimeframe, InpKPeriod, InpDPeriod, InpSlowing,
                          InpMaMethod, InpPriceField);
    if(g_stoch == INVALID_HANDLE)
@@ -171,13 +216,20 @@ int OnInit()
       return(INIT_FAILED);
      }
 
-   PrintFormat("%s: %d digits, point %s. Safety SL = %s price (%.0f points), TP = %s price. Signals %s.",
-               _Symbol, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS),
-               DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_POINT), 5),
-               DoubleToString(InpStopLossDist, 5),
-               InpStopLossDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT),
-               DoubleToString(InpTakeProfitDist, 5),
-               InpInvert ? "INVERTED" : "normal");
+   if(InpSlMode == SL_ATR)
+      PrintFormat("%s: SL = ATR(%d) x %.2f, TP = ATR x %.2f, break-even at ATR x %.2f. Signals %s, trend filter %s.",
+                  _Symbol, InpAtrPeriod, InpAtrSlMult, InpAtrTpMult, InpBreakEvenAtr,
+                  InpInvert ? "INVERTED" : "normal",
+                  InpUseHtf ? EnumToString(InpHtfTimeframe) : "off");
+   else
+      PrintFormat("%s: %d digits, point %s. Fixed SL = %s price (%.0f points), TP = %s price. Signals %s, trend filter %s.",
+                  _Symbol, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS),
+                  DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_POINT), 5),
+                  DoubleToString(InpStopLossDist, 5),
+                  InpStopLossDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT),
+                  DoubleToString(InpTakeProfitDist, 5),
+                  InpInvert ? "INVERTED" : "normal",
+                  InpUseHtf ? EnumToString(InpHtfTimeframe) : "off");
 
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippagePts);
@@ -195,12 +247,17 @@ void OnDeinit(const int reason)
   {
    if(g_stoch != INVALID_HANDLE)
       IndicatorRelease(g_stoch);
+   if(g_htf != INVALID_HANDLE)
+      IndicatorRelease(g_htf);
+   if(g_atr != INVALID_HANDLE)
+      IndicatorRelease(g_atr);
   }
 
 //+------------------------------------------------------------------+
 void OnTick()
   {
    ManageProtection();
+   ManageBreakEven();
 
    datetime barTime = iTime(_Symbol, InpTimeframe, 0);
    if(barTime == 0)
@@ -330,6 +387,22 @@ void HandleSignal(const int cross, const double level, const datetime barTime)
       if(cross < 0 && level < InpSellZone)
         {
          PrintFormat("%s skipped by zone filter: DOWN cross at %.1f is below %.1f", dirText, level, InpSellZone);
+         return;
+        }
+     }
+
+   if(InpUseHtf)
+     {
+      int trend = HtfTrend();
+      if(trend == 0)
+        {
+         PrintFormat("%s skipped: trend filter data not ready", dirText);
+         return;
+        }
+      if(trend != signal)
+        {
+         PrintFormat("%s skipped by trend filter: %s Stochastic points %s", dirText,
+                     EnumToString(InpHtfTimeframe), trend > 0 ? "UP" : "DOWN");
          return;
         }
      }
@@ -547,6 +620,82 @@ void CloseAll()
   }
 
 //+------------------------------------------------------------------+
+//| +1 if the higher-timeframe %K is above %D, -1 if below, 0 if no  |
+//| data. Uses the live (forming) higher-timeframe candle.            |
+//+------------------------------------------------------------------+
+int HtfTrend()
+  {
+   double k[], d[];
+   if(CopyBuffer(g_htf, MAIN_LINE,   0, 1, k) != 1) return(0);
+   if(CopyBuffer(g_htf, SIGNAL_LINE, 0, 1, d) != 1) return(0);
+   if(k[0] > d[0]) return(1);
+   if(k[0] < d[0]) return(-1);
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+//| ATR of the last closed candle on the signal timeframe.           |
+//+------------------------------------------------------------------+
+double AtrValue()
+  {
+   if(g_atr == INVALID_HANDLE)
+      return(0.0);
+   double a[];
+   if(CopyBuffer(g_atr, 0, 1, 1, a) != 1)
+      return(0.0);
+   return(a[0]);
+  }
+
+//+------------------------------------------------------------------+
+//| Move the stop loss to entry (+ spread) once a trade is           |
+//| InpBreakEvenAtr x ATR in profit. Only ever tightens the stop.    |
+//+------------------------------------------------------------------+
+void ManageBreakEven()
+  {
+   if(InpBreakEvenAtr <= 0.0)
+      return;
+   double atr = AtrValue();
+   if(atr <= 0.0)
+      return;
+
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double spread = ask - bid;
+   double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      double tp   = PositionGetDouble(POSITION_TP);
+
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+        {
+         double target = NormalizeDouble(open + spread, digits);
+         if(bid - open >= InpBreakEvenAtr * atr && (sl == 0.0 || sl < target) && bid - target >= minDist)
+           {
+            if(trade.PositionModify(ticket, target, tp))
+               PrintFormat("BUY #%I64u: stop moved to break-even %s", ticket, DoubleToString(target, digits));
+           }
+        }
+      else
+        {
+         double target = NormalizeDouble(open - spread, digits);
+         if(open - ask >= InpBreakEvenAtr * atr && (sl == 0.0 || sl > target) && target - ask >= minDist)
+           {
+            if(trade.PositionModify(ticket, target, tp))
+               PrintFormat("SELL #%I64u: stop moved to break-even %s", ticket, DoubleToString(target, digits));
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
 bool IsOurPosition(const ulong ticket)
   {
    if(!PositionSelectByTicket(ticket))
@@ -618,8 +767,20 @@ bool OpenPosition(const ENUM_ORDER_TYPE type)
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
-   double slDist = (InpStopLossDist   > 0.0) ? MathMax(InpStopLossDist,   minDist) : 0.0;
-   double tpDist = (InpTakeProfitDist > 0.0) ? MathMax(InpTakeProfitDist, minDist) : 0.0;
+   double slRaw = InpStopLossDist, tpRaw = InpTakeProfitDist;
+   if(InpSlMode == SL_ATR)
+     {
+      double atr = AtrValue();
+      if(atr <= 0.0)
+        {
+         Print("Entry skipped: ATR not ready");
+         return(false);
+        }
+      slRaw = InpAtrSlMult * atr;
+      tpRaw = InpAtrTpMult * atr;
+     }
+   double slDist = (slRaw > 0.0) ? MathMax(slRaw, minDist) : 0.0;
+   double tpDist = (tpRaw > 0.0) ? MathMax(tpRaw, minDist) : 0.0;
    double price, sl = 0.0, tp = 0.0;
 
    if(type == ORDER_TYPE_BUY)

@@ -95,6 +95,14 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
 
+## Stop loss, break-even and trend filter (v1.40)
+- **Stop loss mode** `ATR multiple` (default): SL = ATR(14) of the signal timeframe × 2.0. It widens on volatile
+  symbols and quiet hours tighten it, so the same settings work on XAUUSD, FixedVol100, forex, etc.
+  `Fixed price distance` keeps the v1.30 behaviour (`15.0` = a 15.00 price move).
+- **Break-even** (off by default): once a trade is ATR × N in profit, the stop moves to entry + spread.
+- **Trend filter** (on by default): only BUY when the M15 Stochastic(21,3,5) %K is above %D, only SELL when it is below.
+  Exits on the M5 cross are not affected.
+
 ## Invert signals (v1.30)
 `Invert signals = true` trades the opposite way: %K crossing **up** opens a SELL, crossing **down** opens a BUY.
 Exits still happen on every cross. The zone filter still judges the cross itself (UP crosses low, DOWN crosses high).
