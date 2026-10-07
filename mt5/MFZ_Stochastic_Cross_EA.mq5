@@ -1,8 +1,8 @@
 //+------------------------------------------------------------------+
 //|                                     MFZ_Stochastic_Cross_EA.mq5 |
-//|  Stochastic (10, 3, 3) %K / %D crossover Expert Advisor for MT5  |
+//|  Stochastic (21, 3, 5) %K / %D crossover Expert Advisor for MT5  |
 //|                                                                  |
-//|  Rules (signal timeframe, default M5):                           |
+//|  Rules (signal timeframe, default H1; trend filter H4):          |
 //|   - %K crosses UP   %D -> close SELL (take profit) + open BUY    |
 //|   - %K crosses DOWN %D -> close BUY  (take profit) + open SELL   |
 //|                                                                  |
@@ -29,7 +29,7 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.41"
+#property version   "1.50"
 
 #include <Trade\Trade.mqh>
 
@@ -54,10 +54,10 @@ enum ENUM_ENTRY_MODE
 
 //--- Signal
 input group "Stochastic signal"
-input ENUM_TIMEFRAMES InpTimeframe   = PERIOD_M5;    // Signal timeframe
-input int             InpKPeriod     = 10;           // %K period
+input ENUM_TIMEFRAMES InpTimeframe   = PERIOD_H1;    // Signal timeframe
+input int             InpKPeriod     = 21;           // %K period
 input int             InpDPeriod     = 3;            // %D period
-input int             InpSlowing     = 3;            // Slowing
+input int             InpSlowing     = 5;            // Slowing
 input ENUM_MA_METHOD  InpMaMethod    = MODE_SMA;     // MA method
 input ENUM_STO_PRICE  InpPriceField  = STO_LOWHIGH;  // Price field
 input ENUM_ENTRY_MODE InpEntryMode   = ENTRY_BAR_CLOSE; // Entry mode
@@ -84,12 +84,12 @@ input bool            InpReverse     = true;         // Open the opposite trade 
 input int             InpMaxSpreadPts = 0;           // Max spread in points for new entries (0 = off)
 input int             InpSlippagePts = 20;           // Max slippage in points
 input ulong           InpMagic       = 21305;        // Magic number
-input string          InpComment     = "MFZ Stoch"; // Order comment
+input string          InpComment     = "MFZ Stoch H1"; // Order comment
 
 //--- Higher-timeframe trend filter
 input group "Trend filter (higher-timeframe Stochastic)"
 input bool            InpUseHtf      = true;         // Use trend filter
-input ENUM_TIMEFRAMES InpHtfTimeframe = PERIOD_M15;  // Trend timeframe
+input ENUM_TIMEFRAMES InpHtfTimeframe = PERIOD_H4;   // Trend timeframe (must be higher than signal timeframe)
 input int             InpHtfK        = 21;           // Trend %K period
 input int             InpHtfD        = 3;            // Trend %D period
 input int             InpHtfSlowing  = 5;            // Trend slowing
@@ -109,12 +109,12 @@ input int             InpFridayCloseHour = 0;        // Friday: close all + stop
 
 //--- News filter
 input group "News filter (live/demo only, not in Strategy Tester)"
-input bool            InpUseNews     = false;        // Use news filter
+input bool            InpUseNews     = true;         // Use news filter (blocks new entries only)
 input string          InpNewsCurrencies = "USD";     // Currencies to watch (comma separated)
 input bool            InpNewsMedium  = false;        // Also block medium-impact news
 input int             InpNewsBeforeMin = 30;         // Block entries this many minutes before news
 input int             InpNewsAfterMin  = 30;         // Block entries this many minutes after news
-input bool            InpNewsCloseBefore = true;     // Close open trades when the before-news window starts
+input bool            InpNewsCloseBefore = false;    // Close open trades when the before-news window starts
 
 //--- Globals
 CTrade   trade;
@@ -146,6 +146,10 @@ int OnInit()
       Print("Lot size must be greater than zero");
       return(INIT_PARAMETERS_INCORRECT);
      }
+   if(InpUseHtf && PeriodSeconds(InpHtfTimeframe) <= PeriodSeconds(InpTimeframe))
+      PrintFormat("Warning: trend timeframe %s is not higher than signal timeframe %s",
+                  EnumToString(InpHtfTimeframe), EnumToString(InpTimeframe));
+
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    if(InpLots < minLot - 1e-9)
      {

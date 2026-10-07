@@ -73,9 +73,9 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
 
 ---
 
-# MT5 Expert Advisor — Stochastic 10 / 3 / 3 cross
+# MT5 Expert Advisor — Stochastic 21 / 3 / 5 cross (H1)
 
-`mt5/MFZ_Stochastic_Cross_EA.mq5` trades the %K / %D crossover of Stochastic (10, 3, 3 by default; 21, 3, 5 was the original) on **M5**.
+`mt5/MFZ_Stochastic_Cross_EA.mq5` trades the %K / %D crossover of Stochastic (21, 3, 5) on **H1** (v1.50 defaults), with an H4 Stochastic trend filter and an ATR stop.
 
 | Event (on a closed M5 bar) | Action |
 |---|---|
@@ -94,6 +94,19 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
 - Inputs: Stochastic K/D/Slowing, MA method, price field, lot size, trade direction (both / buy only / sell only),
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
+
+## Validated defaults (v1.50)
+XAUUSD, Strategy Tester "Every tick based on real ticks", 0.01 lot, 3,000 deposit, identical settings in every period:
+
+| Period | Net | Profit factor | Trades | Win % | Max equity DD |
+|---|---|---|---|---|---|
+| Jan–Mar 2026 (history quality 0%) | +942.62 | 1.52 | 136 | 38.2 | 11.6% |
+| Apr–Jun 2026 (history quality 92%) | +523.84 | 1.46 | 111 | 38.7 | 12.7% |
+| Jul–Sep 2026 (history quality 100%) | +315.73 | 1.35 | 110 | 46.4 | 6.3% |
+
+The same Stochastic cross on M5 lost about the spread on every trade (PF 0.85) and on M15 still lost (PF 0.94):
+on gold this edge only appears once moves between crosses are large compared with the spread.
+Expect losing streaks of 6–8 trades and drawdowns of 10–15%.
 
 ## Stop loss, break-even and trend filter (v1.40)
 - **Stop loss mode** `ATR multiple` (default): SL = ATR(14) of the signal timeframe × 2.0. It widens on volatile
