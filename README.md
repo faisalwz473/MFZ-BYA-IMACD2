@@ -95,6 +95,12 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
 
+## One copy per symbol (v1.51)
+Two copies of the EA on the same symbol with the same Magic number manage each other's trades: one closes the
+other's positions on its own crosses and blocks its entries. v1.51 refuses to start when another copy with the
+same symbol + Magic is already running (it stores `MFZStoch_<symbol>_<magic>_<chart id>` in the terminal's
+global variables, F3). The chart's top-left corner shows the running version and its main settings.
+
 ## Validated defaults (v1.50)
 XAUUSD, Strategy Tester "Every tick based on real ticks", 0.01 lot, 3,000 deposit, identical settings in every period:
 

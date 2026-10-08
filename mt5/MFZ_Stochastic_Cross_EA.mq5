@@ -29,7 +29,8 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.50"
+#property version   "1.51"
+#define EA_VERSION "1.51"
 
 #include <Trade\Trade.mqh>
 
@@ -132,10 +133,47 @@ datetime g_newsCheckTime = 0;  // news window is refreshed once per minute
 bool     g_newsBlock    = false; // inside a news window
 bool     g_newsUpcoming = false; // the window is before an event (not after)
 string   g_newsTitle    = "";
+string   g_lockName     = "";  // terminal global variable: one EA per symbol + magic
+
+//+------------------------------------------------------------------+
+bool ChartExists(const long id)
+  {
+   for(long c = ChartFirst(); c >= 0; c = ChartNext(c))
+      if(c == id)
+         return(true);
+   return(false);
+  }
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   //--- only one copy of this EA may trade a symbol with a given magic number,
+   //--- otherwise the copies close and block each other's trades
+   if(!MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_OPTIMIZATION))
+     {
+      // lock name carries the chart id: MFZStoch_<symbol>_<magic>_<chart id>
+      string prefix = StringFormat("MFZStoch_%s_%I64u_", _Symbol, InpMagic);
+      for(int i = GlobalVariablesTotal() - 1; i >= 0; i--)
+        {
+         string name = GlobalVariableName(i);
+         if(StringFind(name, prefix) != 0)
+            continue;
+         long owner = StringToInteger(StringSubstr(name, StringLen(prefix)));
+         if(owner == ChartID())
+            continue;
+         if(ChartExists(owner))
+           {
+            PrintFormat("Another copy of this EA already trades %s with magic %I64u on the %s %s chart. "
+                        "Remove it, or give this copy a different Magic number.",
+                        _Symbol, InpMagic, ChartSymbol(owner), EnumToString(ChartPeriod(owner)));
+            return(INIT_FAILED);
+           }
+         GlobalVariableDel(name);   // left over from a chart that was closed
+        }
+      g_lockName = prefix + IntegerToString(ChartID());
+      GlobalVariableSet(g_lockName, (double)TimeCurrent());
+     }
+
    if(InpKPeriod < 1 || InpDPeriod < 1 || InpSlowing < 1)
      {
       Print("Invalid Stochastic periods");
@@ -250,12 +288,25 @@ int OnInit()
    g_lastBarTime  = iTime(_Symbol, InpTimeframe, 0);
    g_lastSign     = 0;
    g_lastEntryBar = 0;
+
+   PrintFormat("MFZ Stochastic Cross EA v%s started: %s, signal %s %d/%d/%d, %s, lot %.2f, magic %I64u",
+               EA_VERSION, _Symbol, EnumToString(InpTimeframe), InpKPeriod, InpDPeriod, InpSlowing,
+               InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", InpLots, InpMagic);
+   Comment(StringFormat("MFZ Stoch EA v%s | signal %s %d/%d/%d | trend %s | SL %s | lot %.2f | magic %I64u",
+                        EA_VERSION, StringSubstr(EnumToString(InpTimeframe), 7),
+                        InpKPeriod, InpDPeriod, InpSlowing,
+                        InpUseHtf ? StringSubstr(EnumToString(InpHtfTimeframe), 7) : "off",
+                        InpSlMode == SL_ATR ? StringFormat("ATR x %.1f", InpAtrSlMult) : DoubleToString(InpStopLossDist, 2),
+                        InpLots, InpMagic));
    return(INIT_SUCCEEDED);
   }
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   Comment("");
+   if(g_lockName != "")
+      GlobalVariableDel(g_lockName);
    if(g_stoch != INVALID_HANDLE)
       IndicatorRelease(g_stoch);
    if(g_htf != INVALID_HANDLE)
