@@ -29,8 +29,8 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.52"
-#define EA_VERSION "1.52"
+#property version   "1.53"
+#define EA_VERSION "1.53"
 
 #include <Trade\Trade.mqh>
 
@@ -102,6 +102,7 @@ input ENUM_TIMEFRAMES InpHtfTimeframe = PERIOD_H4;   // Trend timeframe (must be
 input int             InpHtfK        = 21;           // Trend %K period
 input int             InpHtfD        = 3;            // Trend %D period
 input int             InpHtfSlowing  = 5;            // Trend slowing
+input bool            InpEnterOnAlign = false;       // Also enter when the trend turns to agree with the current H1 side
 
 //--- Daily protection
 input group "Daily protection (account currency, 0 = off)"
@@ -142,6 +143,9 @@ bool     g_newsBlock    = false; // inside a news window
 bool     g_newsUpcoming = false; // the window is before an event (not after)
 string   g_newsTitle    = "";
 string   g_lockName     = "";  // terminal global variable: one EA per symbol + magic
+string   g_label        = "";  // first line of the on-chart status
+string   g_lastDecision = "waiting for the first signal-timeframe candle close";
+int      g_lastHtfTrend = 0;   // trend at the previous signal candle (for alignment entries)
 
 //+------------------------------------------------------------------+
 bool ChartExists(const long id)
@@ -300,7 +304,7 @@ int OnInit()
    PrintFormat("MFZ Stochastic Cross EA v%s started: %s, signal %s %d/%d/%d, %s, lot %.2f, magic %I64u",
                EA_VERSION, _Symbol, EnumToString(InpTimeframe), InpKPeriod, InpDPeriod, InpSlowing,
                InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", InpLots, InpMagic);
-   Comment(StringFormat("MFZ Stoch EA v%s | signal %s %d/%d/%d | trend %s | SL %s | exit %s%s | lot %.2f | magic %I64u",
+   g_label = (StringFormat("MFZ Stoch EA v%s | signal %s %d/%d/%d | trend %s | SL %s | exit %s%s | lot %.2f | magic %I64u",
                         EA_VERSION, StringSubstr(EnumToString(InpTimeframe), 7),
                         InpKPeriod, InpDPeriod, InpSlowing,
                         InpUseHtf ? StringSubstr(EnumToString(InpHtfTimeframe), 7) : "off",
@@ -308,6 +312,7 @@ int OnInit()
                         InpExitMode == EXIT_EVERY_CROSS ? "every cross" : "trend cross",
                         InpTrailAtr > 0.0 ? StringFormat(", trail ATR x %.1f", InpTrailAtr) : "",
                         InpLots, InpMagic));
+   UpdateStatus();
    return(INIT_SUCCEEDED);
   }
 
@@ -351,6 +356,26 @@ void OnTick()
       if(!GetClosedBarSignal(signal, level))
          return;                          // data not ready - retry on the next tick
       g_lastBarTime = barTime;
+
+      // Trend-alignment entry: the trend filter turned to agree with the
+      // side %K is already on, after the cross itself had been filtered out.
+      int trend = InpUseHtf ? HtfTrend() : 0;
+      int prevTrend = g_lastHtfTrend;
+      if(trend != 0)
+         g_lastHtfTrend = trend;
+      if(signal == 0 && InpEnterOnAlign && InpUseHtf && trend != 0 && prevTrend != 0 && trend != prevTrend)
+        {
+         int side = H1Side();
+         int want = InpInvert ? -side : side;
+         if(side != 0 && want == trend &&
+            !HasPosition(trend > 0 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL))
+           {
+            HandleSignal(side, level, barTime, true);
+            UpdateStatus();
+            return;
+           }
+        }
+      UpdateStatus();
      }
 
    if(signal != 0)
@@ -425,13 +450,16 @@ bool GetInstantSignal(int &signal, double &level)
 //+------------------------------------------------------------------+
 //| Exit on every cross, then enter if all filters allow it.         |
 //+------------------------------------------------------------------+
-void HandleSignal(const int cross, const double level, const datetime barTime)
+void HandleSignal(const int cross, const double level, const datetime barTime, const bool alignEntry = false)
   {
    // cross: +1 = %K crossed UP, -1 = crossed DOWN. signal: trade direction.
    const int signal = InpInvert ? -cross : cross;
    bool closedAny = false;
    ENUM_POSITION_TYPE exitType = (signal > 0) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
    string dirText = (signal > 0) ? "BUY" : "SELL";
+   string what    = alignEntry ? StringFormat("%s trend turned %s", StringSubstr(EnumToString(InpHtfTimeframe), 7),
+                                              signal > 0 ? "UP" : "DOWN")
+                               : StringFormat("%s cross at %.1f", cross > 0 ? "UP" : "DOWN", level);
 
    // Exit for the opposite trade. In trend-cross mode an opposite cross
    // only exits when the higher-timeframe trend has turned with it;
@@ -441,37 +469,39 @@ void HandleSignal(const int cross, const double level, const datetime barTime)
      {
       // Never open a new trade while the old one failed to close.
       if(!ClosePositions(exitType, closedAny))
+        {
+         Note(what + ": could not close the open trade, no new entry");
          return;
+        }
      }
    else if(HasPosition(exitType))
      {
-      PrintFormat("%s cross ignored: %s trend still points the other way, holding the open trade",
-                  signal > 0 ? "UP" : "DOWN", EnumToString(InpHtfTimeframe));
+      Note(what + ": trend still points the other way, holding the open trade");
       return;
      }
 
-   if(signal > 0 && InpDirection == DIR_SELL_ONLY) return;
-   if(signal < 0 && InpDirection == DIR_BUY_ONLY)  return;
-   if(!InpReverse && closedAny)                    return;
+   if(signal > 0 && InpDirection == DIR_SELL_ONLY) { Note(what + ": BUY not allowed (Sell only)"); return; }
+   if(signal < 0 && InpDirection == DIR_BUY_ONLY)  { Note(what + ": SELL not allowed (Buy only)"); return; }
+   if(!InpReverse && closedAny)                    { Note(what + ": trade closed, waiting for the next signal"); return; }
 
    string blocked = EntryBlockReason();
    if(blocked != "")
      {
-      PrintFormat("%s skipped: %s", dirText, blocked);
+      Note(StringFormat("%s: %s skipped - %s", what, dirText, blocked));
       return;
      }
 
    // Zone filter judges the cross itself (UP crosses low, DOWN crosses high).
-   if(InpUseZone)
+   if(InpUseZone && !alignEntry)
      {
       if(cross > 0 && level > InpBuyZone)
         {
-         PrintFormat("%s skipped by zone filter: UP cross at %.1f is above %.1f", dirText, level, InpBuyZone);
+         Note(StringFormat("%s: %s skipped by zone filter (above %.1f)", what, dirText, InpBuyZone));
          return;
         }
       if(cross < 0 && level < InpSellZone)
         {
-         PrintFormat("%s skipped by zone filter: DOWN cross at %.1f is below %.1f", dirText, level, InpSellZone);
+         Note(StringFormat("%s: %s skipped by zone filter (below %.1f)", what, dirText, InpSellZone));
          return;
         }
      }
@@ -481,30 +511,37 @@ void HandleSignal(const int cross, const double level, const datetime barTime)
       int trend = HtfTrend();
       if(trend == 0)
         {
-         PrintFormat("%s skipped: trend filter data not ready", dirText);
+         Note(StringFormat("%s: %s skipped - trend filter data not ready", what, dirText));
          return;
         }
       if(trend != signal)
         {
-         PrintFormat("%s skipped by trend filter: %s Stochastic points %s", dirText,
-                     EnumToString(InpHtfTimeframe), trend > 0 ? "UP" : "DOWN");
+         Note(StringFormat("%s: %s skipped by trend filter (%s points %s)", what, dirText,
+                           StringSubstr(EnumToString(InpHtfTimeframe), 7), trend > 0 ? "UP" : "DOWN"));
          return;
         }
      }
 
    if(InpEntryMode == ENTRY_INSTANT && g_lastEntryBar == barTime)
      {
-      PrintFormat("%s skipped: already entered once in this candle", dirText);
+      Note(StringFormat("%s: %s skipped - already entered once in this candle", what, dirText));
+      return;
+     }
+
+   if(HasPosition(signal > 0 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL))
+     {
+      Note(StringFormat("%s: already in a %s", what, dirText));
       return;
      }
 
    if(OpenPosition(signal > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL))
      {
       g_lastEntryBar = barTime;
-      PrintFormat("%s opened (%s mode%s), %s cross at %.1f", dirText,
-                  InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close",
-                  InpInvert ? ", inverted" : "", cross > 0 ? "UP" : "DOWN", level);
+      Note(StringFormat("%s: %s opened (%s mode%s)", what, dirText,
+                        InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", InpInvert ? ", inverted" : ""));
      }
+   else
+      Note(StringFormat("%s: %s order not placed - see the Journal / Experts tab", what, dirText));
   }
 
 //+------------------------------------------------------------------+
@@ -778,6 +815,48 @@ void ManageBreakEven()
            }
         }
      }
+  }
+
+//+------------------------------------------------------------------+
+//| +1 if %K is above %D on the last closed signal candle, -1 below. |
+//+------------------------------------------------------------------+
+int H1Side()
+  {
+   double k[], d[];
+   if(CopyBuffer(g_stoch, MAIN_LINE,   1, 1, k) != 1) return(0);
+   if(CopyBuffer(g_stoch, SIGNAL_LINE, 1, 1, d) != 1) return(0);
+   if(k[0] > d[0]) return(1);
+   if(k[0] < d[0]) return(-1);
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+//| Log a decision and show it on the chart.                         |
+//+------------------------------------------------------------------+
+void Note(const string msg)
+  {
+   Print(msg);
+   g_lastDecision = TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES) + "  " + msg;
+   UpdateStatus();
+  }
+
+//+------------------------------------------------------------------+
+//| On-chart status: settings, live Stochastic sides, last decision. |
+//+------------------------------------------------------------------+
+void UpdateStatus()
+  {
+   string live = "";
+   double k[], d[];
+   if(CopyBuffer(g_stoch, MAIN_LINE, 1, 1, k) == 1 && CopyBuffer(g_stoch, SIGNAL_LINE, 1, 1, d) == 1)
+      live = StringFormat("%s %%K %.1f / %%D %.1f (%s)", StringSubstr(EnumToString(InpTimeframe), 7),
+                          k[0], d[0], k[0] > d[0] ? "above" : "below");
+   if(InpUseHtf)
+     {
+      int t = HtfTrend();
+      live += StringFormat("  |  %s trend %s", StringSubstr(EnumToString(InpHtfTimeframe), 7),
+                           t > 0 ? "UP" : (t < 0 ? "DOWN" : "n/a"));
+     }
+   Comment(g_label + "\n" + live + "\nLast: " + g_lastDecision);
   }
 
 //+------------------------------------------------------------------+

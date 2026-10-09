@@ -95,6 +95,13 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
 
+## Status on the chart and trend-alignment entry (v1.53)
+- The chart's top-left corner shows the settings, the live H1 %K/%D side and H4 trend, and the **last decision**
+  (e.g. `UP cross at 34.2: BUY skipped by trend filter (H4 points DOWN)`), so a day without trades explains itself.
+- **Also enter when the trend turns to agree** (off by default): when the H1 cross was filtered out because H4
+  pointed the other way, and H4 later turns to agree while H1 %K is still on that side, enter at that H1 close.
+  Untested — backtest before using it.
+
 ## Exit options (v1.52, both off by default)
 - **Exit mode = Opposite cross only when the trend filter agrees**: an H1 cross against an open trade only closes it
   when the H4 trend has turned too; otherwise the trade is held. Pair it with a trailing stop.
