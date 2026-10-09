@@ -95,6 +95,12 @@ tick-precise backtester: when one bar touches both sides, the order is estimated
   optional safety SL / TP in points (0 = off), `Reverse` (set false to only exit on a cross and wait for the next one to enter),
   max spread filter, slippage, magic, comment.
 
+## Exit options (v1.52, both off by default)
+- **Exit mode = Opposite cross only when the trend filter agrees**: an H1 cross against an open trade only closes it
+  when the H4 trend has turned too; otherwise the trade is held. Pair it with a trailing stop.
+- **Trailing stop = ATR × N** (0 = off): keeps the stop N × ATR behind price, only ever tightening it.
+Defaults keep the tested behaviour (exit on every opposite cross, no trailing). Backtest before switching.
+
 ## One copy per symbol (v1.51)
 Two copies of the EA on the same symbol with the same Magic number manage each other's trades: one closes the
 other's positions on its own crosses and blocks its entries. v1.51 refuses to start when another copy with the

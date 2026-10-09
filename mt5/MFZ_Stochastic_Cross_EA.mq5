@@ -29,8 +29,8 @@
 //|     no calendar data)                                             |
 //+------------------------------------------------------------------+
 #property copyright "MFZ"
-#property version   "1.51"
-#define EA_VERSION "1.51"
+#property version   "1.52"
+#define EA_VERSION "1.52"
 
 #include <Trade\Trade.mqh>
 
@@ -45,6 +45,12 @@ enum ENUM_SL_MODE
   {
    SL_ATR   = 0, // ATR multiple (adapts to volatility)
    SL_FIXED = 1  // Fixed price distance
+  };
+
+enum ENUM_EXIT_MODE
+  {
+   EXIT_EVERY_CROSS = 0, // Every opposite cross (tested)
+   EXIT_TREND_CROSS = 1  // Opposite cross only when the trend filter agrees
   };
 
 enum ENUM_ENTRY_MODE
@@ -80,6 +86,8 @@ input int             InpAtrPeriod   = 14;           // ATR mode: ATR period (si
 input double          InpAtrSlMult   = 2.0;          // ATR mode: stop loss = ATR x this (0 = off)
 input double          InpAtrTpMult   = 0.0;          // ATR mode: take profit = ATR x this (0 = off, exit on cross)
 input double          InpBreakEvenAtr = 0.0;         // Move SL to entry once profit reaches ATR x this (0 = off)
+input ENUM_EXIT_MODE  InpExitMode    = EXIT_EVERY_CROSS; // Exit mode
+input double          InpTrailAtr    = 0.0;          // Trailing stop = ATR x this behind price (0 = off)
 input bool            InpInvert      = false;        // Invert signals (cross UP = SELL, cross DOWN = BUY)
 input bool            InpReverse     = true;         // Open the opposite trade on the same cross that exits
 input int             InpMaxSpreadPts = 0;           // Max spread in points for new entries (0 = off)
@@ -247,7 +255,7 @@ int OnInit()
          return(INIT_FAILED);
         }
      }
-   if(InpSlMode == SL_ATR || InpBreakEvenAtr > 0.0)
+   if(InpSlMode == SL_ATR || InpBreakEvenAtr > 0.0 || InpTrailAtr > 0.0)
      {
       g_atr = iATR(_Symbol, InpTimeframe, MathMax(InpAtrPeriod, 1));
       if(g_atr == INVALID_HANDLE)
@@ -292,11 +300,13 @@ int OnInit()
    PrintFormat("MFZ Stochastic Cross EA v%s started: %s, signal %s %d/%d/%d, %s, lot %.2f, magic %I64u",
                EA_VERSION, _Symbol, EnumToString(InpTimeframe), InpKPeriod, InpDPeriod, InpSlowing,
                InpEntryMode == ENTRY_INSTANT ? "Instant" : "Bar close", InpLots, InpMagic);
-   Comment(StringFormat("MFZ Stoch EA v%s | signal %s %d/%d/%d | trend %s | SL %s | lot %.2f | magic %I64u",
+   Comment(StringFormat("MFZ Stoch EA v%s | signal %s %d/%d/%d | trend %s | SL %s | exit %s%s | lot %.2f | magic %I64u",
                         EA_VERSION, StringSubstr(EnumToString(InpTimeframe), 7),
                         InpKPeriod, InpDPeriod, InpSlowing,
                         InpUseHtf ? StringSubstr(EnumToString(InpHtfTimeframe), 7) : "off",
                         InpSlMode == SL_ATR ? StringFormat("ATR x %.1f", InpAtrSlMult) : DoubleToString(InpStopLossDist, 2),
+                        InpExitMode == EXIT_EVERY_CROSS ? "every cross" : "trend cross",
+                        InpTrailAtr > 0.0 ? StringFormat(", trail ATR x %.1f", InpTrailAtr) : "",
                         InpLots, InpMagic));
    return(INIT_SUCCEEDED);
   }
@@ -320,6 +330,7 @@ void OnTick()
   {
    ManageProtection();
    ManageBreakEven();
+   ManageTrailing();
 
    datetime barTime = iTime(_Symbol, InpTimeframe, 0);
    if(barTime == 0)
@@ -422,10 +433,22 @@ void HandleSignal(const int cross, const double level, const datetime barTime)
    ENUM_POSITION_TYPE exitType = (signal > 0) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
    string dirText = (signal > 0) ? "BUY" : "SELL";
 
-   // Take profit / exit for the opposite trade. Never open a new trade
-   // while the old one failed to close.
-   if(!ClosePositions(exitType, closedAny))
+   // Exit for the opposite trade. In trend-cross mode an opposite cross
+   // only exits when the higher-timeframe trend has turned with it;
+   // otherwise the trade is held (protected by its stop / trailing stop).
+   bool exitNow = (InpExitMode == EXIT_EVERY_CROSS) || !InpUseHtf || HtfTrend() == signal;
+   if(exitNow)
+     {
+      // Never open a new trade while the old one failed to close.
+      if(!ClosePositions(exitType, closedAny))
+         return;
+     }
+   else if(HasPosition(exitType))
+     {
+      PrintFormat("%s cross ignored: %s trend still points the other way, holding the open trade",
+                  signal > 0 ? "UP" : "DOWN", EnumToString(InpHtfTimeframe));
       return;
+     }
 
    if(signal > 0 && InpDirection == DIR_SELL_ONLY) return;
    if(signal < 0 && InpDirection == DIR_BUY_ONLY)  return;
@@ -753,6 +776,63 @@ void ManageBreakEven()
             if(trade.PositionModify(ticket, target, tp))
                PrintFormat("SELL #%I64u: stop moved to break-even %s", ticket, DoubleToString(target, digits));
            }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool HasPosition(const ENUM_POSITION_TYPE type)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(IsOurPosition(ticket) && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == type)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Keep the stop InpTrailAtr x ATR behind price. Only ever tightens |
+//| the stop, never loosens it.                                      |
+//+------------------------------------------------------------------+
+void ManageTrailing()
+  {
+   if(InpTrailAtr <= 0.0)
+      return;
+   double atr = AtrValue();
+   if(atr <= 0.0)
+      return;
+
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double dist   = InpTrailAtr * atr;
+   double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
+   if(dist < minDist)
+      dist = minDist;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+        {
+         double target = NormalizeDouble(bid - dist, digits);
+         // move only in steps of at least 10% of the distance to avoid modify spam
+         if(sl == 0.0 || target - sl >= 0.1 * dist)
+            trade.PositionModify(ticket, target, tp);
+        }
+      else
+        {
+         double target = NormalizeDouble(ask + dist, digits);
+         if(sl == 0.0 || sl - target >= 0.1 * dist)
+            trade.PositionModify(ticket, target, tp);
         }
      }
   }
